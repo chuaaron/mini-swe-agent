@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+
+"""Run SWE-QA-Bench from a single YAML config."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from minisweagent import package_dir
+from minisweagent.swe_qa_bench.runners import bash_runner, tools_runner
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("run config must be a YAML mapping")
+    return data
+
+
+def _apply_env(env: dict[str, Any] | None) -> None:
+    if not env:
+        return
+    for key, value in env.items():
+        if value is None:
+            continue
+        os.environ[str(key)] = str(value)
+
+
+def _as_repos(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ",".join(str(item) for item in value if str(item).strip())
+    return str(value)
+
+
+def _default_agent_config(mode: str) -> Path:
+    base = package_dir.parents[1] / "swe_qa_bench" / "config"
+    if mode == "tools":
+        return base / "agent_tools.yaml"
+    return base / "agent_bash.yaml"
+
+
+def _default_tool_config() -> Path:
+    return package_dir.parents[1] / "swe_qa_bench" / "config" / "code_search.yaml"
+
+
+def _resolve_path(value: Any) -> Path:
+    if not value:
+        raise ValueError("missing required path in run config")
+    return Path(os.path.expandvars(os.path.expanduser(str(value))))
+
+
+def _get_method(mode: str, value: Any) -> str:
+    if value:
+        return str(value)
+    return "miniswe_tools" if mode == "tools" else "miniswe_bash"
+
+
+def _normalize_optional(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run SWE-QA-Bench from a YAML config")
+    parser.add_argument("--config", required=True, help="Path to run config YAML")
+    args = parser.parse_args()
+
+    config_path = Path(args.config).expanduser().resolve()
+    config = _load_config(config_path)
+
+    mode = str(config.get("mode", "")).strip().lower()
+    if mode not in {"bash", "tools"}:
+        raise ValueError("mode must be 'bash' or 'tools'")
+
+    _apply_env(config.get("env"))
+
+    dataset_root = _resolve_path(config.get("dataset_root"))
+    repos_root = _resolve_path(config.get("repos_root"))
+    repos = _as_repos(config.get("repos"))
+    slice_spec = str(config.get("slice", ""))
+    shuffle = bool(config.get("shuffle", False))
+    shuffle_seed = int(config.get("shuffle_seed", 42))
+    workers = int(config.get("workers", 1))
+
+    output_model_name = str(config.get("output_model_name", "")).strip()
+    if not output_model_name:
+        raise ValueError("output_model_name must be set")
+
+    method = _get_method(mode, config.get("method"))
+    output_dir = _normalize_optional(config.get("output_dir")) or ""
+    image = _normalize_optional(config.get("image"))
+    environment_class = _normalize_optional(config.get("environment_class"))
+    model = _normalize_optional(config.get("model"))
+    model_class = _normalize_optional(config.get("model_class"))
+    redo_existing = bool(config.get("redo_existing", False))
+
+    agent_config = config.get("agent_config") or _default_agent_config(mode)
+    agent_config_path = Path(agent_config).expanduser().resolve()
+
+    if mode == "bash":
+        bash_runner.main(
+            dataset_root=dataset_root,
+            repos_root=repos_root,
+            repos=repos,
+            slice_spec=slice_spec,
+            shuffle=shuffle,
+            shuffle_seed=shuffle_seed,
+            workers=workers,
+            config_path=agent_config_path,
+            model=model,
+            model_class=model_class,
+            environment_class=environment_class,
+            image=image,
+            output_model_name=output_model_name,
+            method=method,
+            output_dir=output_dir,
+            redo_existing=redo_existing,
+        )
+        return
+
+    tool_config = config.get("tool_config") or _default_tool_config()
+    tool_config_path = Path(tool_config).expanduser().resolve()
+    tools_runner.main(
+        dataset_root=dataset_root,
+        repos_root=repos_root,
+        repos=repos,
+        slice_spec=slice_spec,
+        shuffle=shuffle,
+        shuffle_seed=shuffle_seed,
+        workers=workers,
+        config_path=agent_config_path,
+        tool_config_path=tool_config_path,
+        model=model,
+        model_class=model_class,
+        environment_class=environment_class,
+        image=image,
+        output_model_name=output_model_name,
+        method=method,
+        output_dir=output_dir,
+        redo_existing=redo_existing,
+    )
+
+
+if __name__ == "__main__":
+    main()

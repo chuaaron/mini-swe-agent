@@ -1,0 +1,145 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to localize code.
+    Your response must contain exactly ONE bash code block with ONE command (or commands connected with && or ||).
+    Never output multiple bash code blocks. If you need multiple actions, chain them with && in one command.
+
+    Include a THOUGHT section before your command where you explain your reasoning process.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <task>
+    You are doing code localization only. Do NOT edit or create files.
+
+    Problem statement:
+    {{task}}
+    </task>
+
+    <repository>
+    Repo slug: {{ repo_slug }}
+    Base commit: {{ base_commit }}
+    Working directory: {{ workdir }}
+    </repository>
+
+    <instructions>
+    ## Single-Action Protocol (Hard Rule)
+    - Your reply must contain exactly ONE THOUGHT section.
+    - Your reply must contain exactly ONE bash code block.
+    - That bash block must contain exactly ONE command.
+      If you need multiple actions, chain them with && or || in the same command.
+    - Do NOT output multiple bash code blocks.
+    - Stop immediately after the bash code block (no extra text).
+
+    ## Goal
+    Identify the most relevant files and entities that should be edited to address the problem.
+
+    ## Rules
+    - Read-only work: do not modify files.
+    - Prefer fast search tools like rg and targeted file reads.
+    - Do not run tests.
+    - File paths must be relative to the repo root (no leading slash).
+    - Entity format: "path/to/file.py:entity_name" (function, class, or method).
+
+    ## Final output
+    When you are done, output ONLY a valid JSON object with these keys:
+    - found_files: list of file paths
+    - found_entities: list of "path:entity" strings
+    - found_modules: list of "path:module" strings (optional)
+
+    Submit by running a single command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"found_files":["path/to/file.py"],"found_entities":["path/to/file.py:my_func"],"found_modules":["path/to/file.py:my_func"]}\n'
+    </instructions>
+  action_observation_template: |
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue a single command that prints:
+    MINI_SWE_AGENT_FINAL_OUTPUT
+    <json payload>
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    THOUGHT: Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  timeout_template: |
+    The last command <command>{{action['action']}}</command> timed out and has been killed.
+    The output of the command was:
+    {% if output | length < 10000 -%}
+    <output>
+    {{output}}
+    </output>
+    {%- else -%}
+    <warning>Output was too long and has been truncated.</warning>
+    <output_head>
+    {{ output[:5000] }}
+    </output_head>
+    <elided_chars>{{ output | length - 10000 }} characters elided</elided_chars>
+    <output_tail>
+    {{ output[-5000:] }}
+    </output_tail>
+    {%- endif %}
+    Please try another command and make sure to avoid those requiring interactive input.
+  step_limit: 120
+  cost_limit: 3.
+
+environment:
+  environment_class: docker
+  image: locbench-minisweagent:latest
+  cwd: "/"
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+
+run:
+  env_startup_command: |
+    mkdir -p /work &&
+    rm -rf {{ workdir_q }} &&
+    git -c safe.directory=* clone --no-hardlinks {{ repo_mount_path_q }} {{ workdir_q }} &&
+    cd {{ workdir_q }} &&
+    git checkout -q {{ base_commit_q }}

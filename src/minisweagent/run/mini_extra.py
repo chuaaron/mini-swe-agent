@@ -14,6 +14,9 @@ subcommands = [
     ("minisweagent.run.extra.config", ["config"], "Manage the global config file"),
     ("minisweagent.run.extra.inspector", ["inspect", "i", "inspector"], "Run inspector (browse trajectories)"),
     ("minisweagent.run.extra.github_issue", ["github-issue", "gh"], "Run on a GitHub issue"),
+    ("minisweagent.run.extra.locbench", ["locbench"], "Evaluate on LocBench (localization)"),
+    ("minisweagent.run.extra.locbench_tools", ["locbench-tools"], "Evaluate on LocBench with tools enabled"),
+    ("minisweagent.run.extra.locbench_code_search", ["locbench-code-search"], "Evaluate LocBench with code_search only"),
     ("minisweagent.run.extra.swebench", ["swebench"], "Evaluate on SWE-bench (batch mode)"),
     ("minisweagent.run.extra.swebench_single", ["swebench-single"], "Evaluate on SWE-bench (single instance)"),
 ]

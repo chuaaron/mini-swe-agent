@@ -8,4 +8,5 @@
 ## Extras
 
 * `extra/github_issue.py` - Solve a GitHub issue with a docker environment.
+* `extra/locbench.py` - Benchmark localization on LocBench (docker).
 * `extra/swebench.py` - Benchmark the performance of the `default.py` agent.
