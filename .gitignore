@@ -10,6 +10,7 @@ traj.json
 swe_qa_bench/config/run_*.yaml
 swe_qa_bench/config/run_example.yaml
 swe_qa_bench/config/score_*.yaml
+swe_qa_bench/config/local.yaml
 
 # generated locbench worktrees
 locbench/tool_worktrees/
@@ -24,6 +25,9 @@ locbench/loc_output/
 # swe_qa_bench artifacts
 swe_qa_bench/indexes/
 swe_qa_bench/outputs/
+swe_qa_bench/models/
+swe_qa_bench/results/
+swe_qa_bench/worktrees/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python

@@ -20,15 +20,9 @@
 mini-swe-agent/swe_qa_bench/config/code_search.yaml
 ```
 
-关键字段示例：
-
-```yaml
-embedding_model: /data/locbench/mini-swe-agent/swe_qa_bench/models/CodeRankEmbed
-index_root: /data/locbench/mini-swe-agent/swe_qa_bench/indexes
-chunk_size: 800
-chunk_overlap: 200
-trust_remote_code: true
-```
+说明：
+- `embedding_model` 与 `index_root` 由 `local.yaml` 中的 `paths.model_root` / `paths.indexes_root` 动态注入。
+- `code_search.yaml` 只保留通用参数（chunk_size/overlap/trust_remote_code）。
 
 ---
 
@@ -43,6 +37,10 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.build_index \
   --repos requests \
   --tool-config /Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/config/code_search.yaml
 ```
+
+说明：
+- 默认会读取 `default.yaml` + `local.yaml` 中的 `paths.indexes_root` / `paths.model_root`。
+- 可用 CLI 覆盖：`--indexes-root` / `--model-root`。
 
 构建多个 repo：
 
@@ -72,4 +70,3 @@ mini-swe-agent/swe_qa_bench/indexes/<repo>/...
 ```
 
 tools 运行时会读取该目录，确保路径与 `code_search.yaml` 一致。
-

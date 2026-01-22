@@ -13,6 +13,7 @@ import typer
 import yaml
 
 from minisweagent.config import get_config_path
+from minisweagent.swe_qa_bench.config_loader import load_config
 from minisweagent.tools.code_search import CodeSearchTool
 
 _HELP_TEXT = "Prebuild code_search indexes for SWE-QA-Bench repos."
@@ -56,6 +57,9 @@ def main(
         "--tool-config",
         help="Path to code_search config",
     ),
+    config_dir: Path | None = typer.Option(None, "--config-dir", help="Optional config dir for default/local.yaml"),
+    indexes_root: str | None = typer.Option(None, "--indexes-root", help="Override indexes root"),
+    model_root: str | None = typer.Option(None, "--model-root", help="Override embedding model root"),
 ) -> None:
     # fmt: on
     repos_root = repos_root.resolve()
@@ -68,6 +72,17 @@ def main(
 
     config_path = get_config_path(tool_config_path)
     tool_config: dict[str, Any] = yaml.safe_load(config_path.read_text())
+    if not indexes_root or not model_root:
+        if config_dir is not None:
+            config_dir = config_dir.expanduser().resolve()
+        base_config = load_config(config_dir=config_dir)
+        paths = base_config.get("paths", {})
+        indexes_root = indexes_root or paths.get("indexes_root")
+        model_root = model_root or paths.get("model_root")
+    if not indexes_root or not model_root:
+        raise typer.BadParameter("indexes_root and model_root must be set (via local.yaml or CLI)")
+    tool_config["index_root"] = str(indexes_root)
+    tool_config["embedding_model"] = str(model_root)
     tool = CodeSearchTool(tool_config)
 
     start_time = time.time()

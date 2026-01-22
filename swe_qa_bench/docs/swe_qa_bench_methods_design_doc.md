@@ -8,8 +8,8 @@
 
 | 方法 | 入口 | 是否用 LLM | 是否用 Docker | 是否用 code_search |
 |------|------|------------|---------------|--------------------|
-| Bash-only | `run_from_yaml (mode=bash)` | ✅ | ✅ | ❌ |
-| Tools | `run_from_yaml (mode=tools)` | ✅ | ✅ | ✅ |
+| Bash-only | `python -m minisweagent.run_swe_qa --mode bash` | ✅ | ✅ | ❌ |
+| Tools | `python -m minisweagent.run_swe_qa --mode tools` | ✅ | ✅ | ✅ |
 
 ---
 
@@ -20,7 +20,7 @@
 - `datasets/repos/{repo}/`（只读挂载到容器 `/repos`）
 
 **输出**
-- `datasets/answers/{MODEL}/{METHOD}/{repo}.jsonl`
+- `swe_qa_bench/results/answers/{MODEL}/{METHOD}/{repo}.jsonl`
 - 每行输出字段（必须对齐）：
 
 ```json
@@ -93,7 +93,7 @@
 ## 6. 输出与日志
 
 - 轨迹/日志：`mini-swe-agent/swe_qa_bench/outputs/<model>/<method>/<timestamp>/`
-- 答案输出：`datasets/answers/<model>/<method>/<repo>.jsonl`
+- 答案输出：`swe_qa_bench/results/answers/<model>/<method>/<repo>.jsonl`
 
 ---
 
@@ -102,4 +102,3 @@
 - SWE-QA-Bench 不提供 `base_commit`，默认使用仓库 HEAD。
 - 输出格式是 QA 文本，不是 `found_files`/`found_entities`。
 - 评分采用 LLM-as-judge（五维度评分）。
-

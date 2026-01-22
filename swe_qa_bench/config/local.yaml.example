@@ -1,0 +1,31 @@
+# SWE-QA-Bench local config (copy to local.yaml and edit paths/secrets)
+
+paths:
+  dataset_root: /data/locbench/SWE-QA-Bench/SWE-QA-Bench/datasets
+  output_model_name: openai_deepseek-v3.2
+
+# 可选覆盖（不填则使用 default.yaml 的相对路径）
+#  repos_root: /data/locbench/SWE-QA-Bench/SWE-QA-Bench/datasets/repos
+#  indexes_root: /data/locbench/mini-swe-agent/swe_qa_bench/indexes
+#  model_root: /data/locbench/mini-swe-agent/locbench/models/CodeRankEmbed
+#  output_root: /data/locbench/mini-swe-agent/swe_qa_bench/results
+
+pricing:
+  models:
+    deepseek-v3.2:
+      prompt_per_1k: 0.0012
+      completion_per_1k: 0.0018
+      currency: USD
+
+billing:
+  mode: auto
+  estimate:
+    tokenizer: tiktoken
+    encoding: cl100k_base
+    message_overhead:
+      per_message: 3
+      per_name: 1
+
+env:
+  OPENAI_API_KEY: sk-xxx
+  OPENAI_API_BASE: https://api.example.com/v1/chat/completions

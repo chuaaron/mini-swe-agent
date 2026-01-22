@@ -13,6 +13,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from minisweagent.billing import BillingTracker
 from minisweagent.models import GLOBAL_MODEL_STATS
 
 logger = logging.getLogger("chatanywhere_model")
@@ -22,6 +23,8 @@ class ChatAnywhereModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
     api_url: str | None = None
+    pricing: dict[str, Any] | None = None
+    billing: dict[str, Any] | None = None
 
 
 class ChatAnywhereAPIError(Exception):
@@ -43,6 +46,15 @@ class ChatAnywhereModel:
         self.n_calls = 0
         self._api_url = self._resolve_api_url()
         self._api_key = os.getenv("OPENAI_API_KEY", "")
+        self._billing = BillingTracker(
+            model_name=self.config.model_name,
+            pricing=self.config.pricing,
+            billing=self.config.billing,
+        )
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.billing_mode = ""
 
     def _resolve_api_url(self) -> str:
         if self.config.api_url:
@@ -91,17 +103,34 @@ class ChatAnywhereModel:
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
-
-        usage = response.get("usage", {})
-        cost = usage.get("cost", 0.0) or 0.0
+        content = response.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        call_stats = self._billing.add_call(
+            messages=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
+            response=response,
+            completion_text=content,
+        )
+        cost = call_stats["cost_usd"]
         self.n_calls += 1
         self.cost += cost
         GLOBAL_MODEL_STATS.add(cost)
+        self.prompt_tokens = self._billing.prompt_tokens
+        self.completion_tokens = self._billing.completion_tokens
+        self.total_tokens = self._billing.total_tokens
+        self.billing_mode = self._billing.summary().get("billing_mode", "")
 
         return {
-            "content": response.get("choices", [{}])[0].get("message", {}).get("content", "") or "",
-            "extra": {"response": response},
+            "content": content,
+            "extra": {"response": response, "billing": call_stats},
         }
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump() | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return self.config.model_dump() | {
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def get_billing_stats(self) -> dict[str, Any]:
+        return self._billing.summary()

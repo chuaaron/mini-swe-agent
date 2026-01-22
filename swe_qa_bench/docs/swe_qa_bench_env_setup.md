@@ -59,12 +59,18 @@ pip install torch transformers einops
 
 ## 4. API 与模型配置
 
-推荐通过 YAML 注入环境变量（避免命令行过长）：
+在 `swe_qa_bench/config/local.yaml` 中配置 API 与路径（文件已忽略提交）：
 
 ```yaml
 env:
   OPENAI_API_KEY: "sk-xxx"
   OPENAI_API_BASE: "https://api.example.com/v1/chat/completions"
+```
+
+建议先复制模板：
+```bash
+cp $MINISWE_ROOT/swe_qa_bench/config/local.yaml.example \\
+  $MINISWE_ROOT/swe_qa_bench/config/local.yaml
 ```
 
 说明：
@@ -90,11 +96,9 @@ docker build -t locbench-minisweagent:latest -f locbench/Dockerfile .
 
 配置文件：`$MINISWE_ROOT/swe_qa_bench/config/code_search.yaml`
 
-```yaml
-embedding_model: /data/locbench/mini-swe-agent/swe_qa_bench/models/CodeRankEmbed
-index_root: /data/locbench/mini-swe-agent/swe_qa_bench/indexes
-trust_remote_code: true
-```
+说明：
+- `embedding_model` 与 `index_root` 由 `local.yaml` 中的 `paths.model_root` / `paths.indexes_root` 动态注入。
+- `code_search.yaml` 仅保留通用参数（chunker、overlap、trust_remote_code 等）。
 
 可选：离线模式
 
@@ -109,6 +113,5 @@ export HF_HOME=$MINISWE_ROOT/swe_qa_bench/models
 
 - `datasets/questions/` 与 `datasets/reference/` 存在
 - `datasets/repos/<repo>` 可读（只读挂载）
-- `run_bash.yaml` / `run_tools.yaml` 已更新路径与 API
+- `default.yaml` 与 `local.yaml` 已配置路径与 API
 - tools 模式已完成索引构建（见索引文档）
-

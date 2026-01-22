@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from minisweagent.swe_qa_bench.config_loader import load_config
 from minisweagent.swe_qa_bench.score import _resolve_api_url, score_dataset
 
 
@@ -54,12 +55,19 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to score config YAML")
     args = parser.parse_args()
 
+    # Ensure local.yaml env is applied (API keys, base URLs).
+    local_config = load_config()
+
     config_path = Path(args.config).expanduser().resolve()
     config = _load_config(config_path)
 
     _apply_env(config.get("env"))
 
     dataset_root = Path(config.get("dataset_root")).expanduser().resolve()
+    output_root_value = config.get("output_root")
+    if output_root_value is None:
+        output_root_value = (local_config.get("paths", {}) if isinstance(local_config, dict) else {}).get("output_root")
+    output_root = Path(str(output_root_value)).expanduser().resolve() if output_root_value else None
     candidate_model = _normalize_optional(config.get("candidate_model"))
     method = _normalize_optional(config.get("method"))
     judge_model = _normalize_optional(config.get("judge_model"))
@@ -96,6 +104,7 @@ def main() -> None:
         repos=repos,
         max_workers=max_workers,
         timeout=timeout,
+        output_root=output_root,
     )
 
 

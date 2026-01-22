@@ -74,6 +74,8 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="Path to run config YAML")
     args = parser.parse_args()
 
+    print("Warning: run_from_yaml is deprecated. Use `python -m minisweagent.run_swe_qa` instead.")
+
     config_path = Path(args.config).expanduser().resolve()
     config = _load_config(config_path)
 
@@ -84,7 +86,12 @@ def main() -> None:
     _apply_env(config.get("env"))
 
     dataset_root = _resolve_path(config.get("dataset_root"))
-    repos_root = _resolve_path(config.get("repos_root"))
+    repos_root_value = config.get("repos_root")
+    if not repos_root_value or not str(repos_root_value).strip():
+        repos_root = dataset_root / "repos"
+    else:
+        repos_root = _resolve_path(repos_root_value)
+    output_root = _resolve_path(config.get("output_root") or config.get("dataset_root"))
     repos = _as_repos(config.get("repos"))
     slice_spec = str(config.get("slice", ""))
     shuffle = bool(config.get("shuffle", False))
@@ -102,15 +109,18 @@ def main() -> None:
     model = _normalize_optional(config.get("model"))
     model_class = _normalize_optional(config.get("model_class"))
     redo_existing = bool(config.get("redo_existing", False))
+    pricing = config.get("pricing")
+    billing = config.get("billing")
 
     agent_config = config.get("agent_config") or _default_agent_config(mode)
     agent_config_path = Path(agent_config).expanduser().resolve()
 
     if mode == "bash":
-        bash_runner.main(
+        runner = bash_runner.BashRunner(
             dataset_root=dataset_root,
             repos_root=repos_root,
-            repos=repos,
+            output_root=output_root,
+            repos=[item for item in repos.split(",") if item] if repos else [],
             slice_spec=slice_spec,
             shuffle=shuffle,
             shuffle_seed=shuffle_seed,
@@ -124,15 +134,19 @@ def main() -> None:
             method=method,
             output_dir=output_dir,
             redo_existing=redo_existing,
+            pricing=pricing,
+            billing=billing,
         )
+        runner.run()
         return
 
     tool_config = config.get("tool_config") or _default_tool_config()
     tool_config_path = Path(tool_config).expanduser().resolve()
-    tools_runner.main(
+    runner = tools_runner.ToolsRunner(
         dataset_root=dataset_root,
         repos_root=repos_root,
-        repos=repos,
+        output_root=output_root,
+        repos=[item for item in repos.split(",") if item] if repos else [],
         slice_spec=slice_spec,
         shuffle=shuffle,
         shuffle_seed=shuffle_seed,
@@ -147,7 +161,12 @@ def main() -> None:
         method=method,
         output_dir=output_dir,
         redo_existing=redo_existing,
+        indexes_root=None,
+        model_root=None,
+        pricing=pricing,
+        billing=billing,
     )
+    runner.run()
 
 
 if __name__ == "__main__":

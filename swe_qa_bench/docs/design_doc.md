@@ -12,6 +12,7 @@
 - `swe_qa_bench/docs/swe_qa_bench_methods_design_doc.md`：方法设计总览
 - `swe_qa_bench/docs/swe_qa_bench_scoring_doc.md`：评分流程与配置
 - `swe_qa_bench/docs/swe_qa_bench_index_doc.md`：tools 索引构建
+- `swe_qa_bench/docs/swe_qa_bench_config_refactor_design_doc.md`：配置重构设计
 
 ---
 
@@ -33,7 +34,7 @@
 
 **迁移原则**
 - SWE-QA-Bench 测评应与 LocBench 平行建设，代码与配置放在独立目录，不共享输出路径。
-- 输出写入 SWE-QA-Bench 原生 `datasets/answers/...`，评分逻辑迁移到 mini-swe-agent 内部实现。
+- 输出写入 `mini-swe-agent/swe_qa_bench/results/...`，评分逻辑迁移到 mini-swe-agent 内部实现。
 
 ---
 
@@ -69,9 +70,12 @@ mini-swe-agent/src/minisweagent/
 ```
 SWE-QA-Bench/SWE-QA-Bench/
   datasets/questions/{repo}.jsonl
-  datasets/answers/{MODEL}/{METHOD}/{repo}.jsonl
-  datasets/scores/{MODEL}/{METHOD}/{repo}.jsonl
+  datasets/reference/{repo}.jsonl
   datasets/repos/{repo}/
+
+mini-swe-agent/swe_qa_bench/results/
+  answers/{MODEL}/{METHOD}/{repo}.jsonl
+  scores/{MODEL}/{METHOD}/{repo}.jsonl
 ```
 
 ---
@@ -81,12 +85,11 @@ SWE-QA-Bench/SWE-QA-Bench/
 **目标**
 - 使用 mini-swe-agent 自动回答 SWE-QA-Bench 问题
 - 输出严格对齐官方格式
-- 能被官方评分模块直接读取
+- 能被 mini-swe-agent 内部评分脚本直接读取
 
 **范围**
-- 只实现 **答案生成**（answers）
-- 评分仍交给 SWE-QA-Bench 的 `score/`
-- 不改数据集结构
+- 实现 **答案生成** 与 **评分**（LLM-as-judge 迁移到 mini-swe-agent）
+- 不改数据集结构（questions/reference/repos 保持原位置）
 
 **已确认决策（来自需求方）**
 - 同时实现 bash-only 与 tools 两种方法
@@ -109,7 +112,7 @@ SWE-QA-Bench/SWE-QA-Bench/
 - 每行字段：`question`, `ground_truth`, `answer`, `relative_code_list`, `score`
 
 **输出（必须对齐）**
-- `datasets/answers/{MODEL}/{METHOD}/{repo}.jsonl`
+- `swe_qa_bench/results/answers/{MODEL}/{METHOD}/{repo}.jsonl`
 - 每行必须包含：
   ```json
   {"question": "...", "answer": "...", "final_answer": "...", "relative_code_list": ["..."]}
@@ -186,26 +189,22 @@ src/minisweagent/run/extra/swe_qa_bench_tools.py
 --workers N               # 并发
 --model <provider/model>  # LLM
 --method <string>         # 固定：miniswe_bash / miniswe_tools
-    --output-model-name <str> # 输出目录名（必填，用于 answers/{MODEL}/...）
+    --output-model-name <str> # 输出目录名（必填，用于 results/answers/{MODEL}/...）
 ```
 
 ### 5.5 单文件运行配置（推荐）
 
-为减少命令行复杂度，提供一个轻量脚本读取 YAML 并调用 runner：
+为减少命令行复杂度，统一入口 `run_swe_qa.py` 默认加载配置：
 
 ```
-PYTHONPATH=src python -m minisweagent.swe_qa_bench.run_from_yaml --config <run.yaml>
+PYTHONPATH=src python -m minisweagent.run_swe_qa --mode bash
 ```
 
-run.yaml 示例见：
-`mini-swe-agent/swe_qa_bench/config/run_example.yaml`
+配置文件：
+- `swe_qa_bench/config/default.yaml`（提交）
+- `swe_qa_bench/config/local.yaml`（本机，忽略提交）
 
-该文件可同时包含：
-- 数据集路径、切片、并发
-- 输出路径与方法名
-- Docker 镜像
-- agent/tool 配置文件
-- API key（通过 `env:` 字段注入到当前进程）
+`run_from_yaml` 入口已标记为 Deprecated（仅保留兼容）。
 
 ### 5.3 核心流程
 
@@ -216,7 +215,7 @@ for repo in repos:
     run agent
     parse final JSON {answer: "..."}
     collect relative_code_list
-    append to answers/{MODEL}/{METHOD}/{repo}.jsonl
+    append to results/answers/{MODEL}/{METHOD}/{repo}.jsonl
 ```
 
 ### 5.4 relative_code_list 采集规则（必须实现）
@@ -293,7 +292,7 @@ mini-swe-agent/swe_qa_bench/indexes/
 
 **答案输出**
 ```
-SWE-QA-Bench/SWE-QA-Bench/datasets/answers/{MODEL}/{METHOD}/{repo}.jsonl
+mini-swe-agent/swe_qa_bench/results/answers/{MODEL}/{METHOD}/{repo}.jsonl
 ```
 
 **并发写入要求**
@@ -341,7 +340,8 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score \
 
 已落地的模块与入口：
 - Runner：`src/minisweagent/swe_qa_bench/runners/bash_runner.py` / `tools_runner.py`
-- YAML 运行入口：`src/minisweagent/swe_qa_bench/run_from_yaml.py`
+- 统一入口：`src/minisweagent/run_swe_qa.py`
+- Deprecated：`src/minisweagent/swe_qa_bench/run_from_yaml.py`
 - 评分模块：`src/minisweagent/swe_qa_bench/score.py`
 - 评分入口：`src/minisweagent/swe_qa_bench/score_from_yaml.py`
 - 索引构建：`src/minisweagent/swe_qa_bench/build_index.py`

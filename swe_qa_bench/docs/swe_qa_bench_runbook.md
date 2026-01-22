@@ -1,7 +1,7 @@
 # SWE-QA-Bench 实验命令操作文档（迁移友好版）
 
 本文档集中维护 **跑实验的命令**，适用于本地与服务器迁移场景。
-推荐使用 YAML 运行入口，避免复杂命令行。
+配置采用 default/local 分层，迁移时只改 `local.yaml`。
 
 ---
 
@@ -18,7 +18,7 @@ export SWEQA_INDEX=$MINISWE_ROOT/swe_qa_bench/indexes
 
 说明：
 - `SWEQA_MODEL` 与 `SWEQA_INDEX` 仅在 tools 模式需要。
-- YAML 里的路径支持环境变量展开。
+- 路径优先在 `swe_qa_bench/config/local.yaml` 中配置。
 
 ---
 
@@ -31,56 +31,96 @@ docker build -t locbench-minisweagent:latest -f locbench/Dockerfile .
 
 ---
 
-## 2. 运行命令（推荐：YAML）
+## 2. 运行命令（统一入口）
 
-说明：`run_*.yaml` 通常包含 API key，已加入 `.gitignore`，迁移时请手动拷贝。
+配置文件：
+- `swe_qa_bench/config/default.yaml`（提交到 Git，内置相对路径默认值）
+- `swe_qa_bench/config/local.yaml`（本机配置，已加入 `.gitignore`）
+
+说明：`run_from_yaml` 已标记为 Deprecated，仅保留兼容。
+
+建议先复制模板：
+```bash
+cp $MINISWE_ROOT/swe_qa_bench/config/local.yaml.example \\
+  $MINISWE_ROOT/swe_qa_bench/config/local.yaml
+```
+
+注意：
+- `--repos` 后面的参数不要被换行拆开（否则 shell 会把 repo 名当作命令）。
+- 迁移到新机器时，通常只需改 `local.yaml` 里的 `dataset_root` 和 `OPENAI_API_KEY`。
 
 ### 2.1 Bash-only（基线）
 
 ```bash
 cd $MINISWE_ROOT
-PYTHONPATH=src python -m minisweagent.swe_qa_bench.run_from_yaml \
-  --config $MINISWE_ROOT/swe_qa_bench/config/run_bash.yaml
+PYTHONPATH=src python -m minisweagent.run_swe_qa --mode bash
 ```
+
+最小化单条 sanity run（与当前实验一致）：
+```bash
+cd $MINISWE_ROOT
+PYTHONPATH=src python -m minisweagent.run_swe_qa \\
+  --mode bash --repos requests --slice 0:1 --workers 1 --redo-existing
+```
+
+说明：
+- `--redo-existing` 会把同一问题追加到 `answers/*.jsonl`，需要干净评分时先清理该文件。
+- 运行完成会打印 `Answer appended to: .../answers/<model>/<method>/<repo>.jsonl`。
 
 ### 2.2 Tools（bash + code_search）
 
 ```bash
 cd $MINISWE_ROOT
-PYTHONPATH=src python -m minisweagent.swe_qa_bench.run_from_yaml \
-  --config $MINISWE_ROOT/swe_qa_bench/config/run_tools.yaml
+PYTHONPATH=src python -m minisweagent.run_swe_qa --mode tools
 ```
+
+最小化单条 sanity run（tools）：
+```bash
+cd $MINISWE_ROOT
+PYTHONPATH=src python -m minisweagent.run_swe_qa \\
+  --mode tools --repos requests --slice 0:1 --workers 1 --redo-existing
+```
+
+说明：
+- tools 模式需要已构建索引与模型路径（见 `local.yaml` 的 `paths.indexes_root` 与 `paths.model_root`）。
 
 ---
 
 ## 3. 同一批随机样本（建议三种方法对比）
 
-在 `run_bash.yaml` / `run_tools.yaml` 中设置：
+在 `default.yaml` / `local.yaml` 中设置：
 
 ```yaml
-shuffle: true
-shuffle_seed: 123
-slice: "0:20"
+run:
+  shuffle: true
+  shuffle_seed: 123
+  slice: "0:20"
 ```
 
 支持指定仓库（两种写法等价）：
 
 ```yaml
-repos: ["requests", "flask"]
-# 或
-repos: "requests,flask"
+run:
+  repos: ["requests", "flask"]
+  # 或
+  # repos: "requests,flask"
 ```
 
 ---
 
-## 4. 输出路径说明
+## 4. 输出路径说明（已与数据集解耦）
 
 - 轨迹与日志：
   - `$MINISWE_ROOT/swe_qa_bench/outputs/<model>/<method>/<timestamp>/`
-- 候选答案：
-  - `$SWEQA_DATASET/answers/<model>/<method>/<repo>.jsonl`
-- 评分输出：
-  - `$SWEQA_DATASET/scores/<model>/<method>/<repo>.jsonl`
+- 候选答案（不再写入数据集目录）：
+  - `$MINISWE_ROOT/swe_qa_bench/results/answers/<model>/<method>/<repo>.jsonl`
+- 评分输出（不再写入数据集目录）：
+  - `$MINISWE_ROOT/swe_qa_bench/results/scores/<model>/<method>/<repo>.jsonl`
+
+说明：
+- answers 里的每条记录包含 `stats` 字段（token/cost/api_calls 等）。
+- `Overall Progress ($X.XX)` 来自计费统计，若为 0.00 请确认 `tiktoken` 已安装。
+- 输出根目录可在 `swe_qa_bench/config/local.yaml` 中通过 `paths.output_root` 自定义。
 
 ---
 
@@ -105,5 +145,5 @@ rm -rf $MINISWE_ROOT/swe_qa_bench/worktrees/*
 ```
 
 注意：
-- 不建议删除 `datasets/answers` 与 `datasets/scores`，除非你明确要重跑全量。
+- 不建议删除 `swe_qa_bench/results/answers` 与 `swe_qa_bench/results/scores`，除非你明确要重跑全量。
 - tools 模式的索引通常较大，清理请谨慎：`$MINISWE_ROOT/swe_qa_bench/indexes/`。

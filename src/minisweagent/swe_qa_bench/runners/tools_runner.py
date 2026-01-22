@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import typer
 import yaml
 from jinja2 import StrictUndefined, Template
 from rich.live import Live
@@ -28,6 +27,7 @@ from minisweagent.swe_qa_bench.utils import (
     FileReadTracker,
     TrackingToolRegistry,
     append_jsonl,
+    build_answer_stats,
     extract_json_payload,
     load_jsonl,
     merge_relative_code_list,
@@ -35,10 +35,6 @@ from minisweagent.swe_qa_bench.utils import (
 )
 from minisweagent.tools.code_search import CodeSearchTool
 from minisweagent.utils.log import add_file_handler, logger
-
-_HELP_TEXT = "Run SWE-QA-Bench in tools mode."
-
-app = typer.Typer(rich_markup_mode="rich", add_completion=False)
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 
@@ -61,6 +57,83 @@ class ProgressTrackingToolAgent(ToolAgent):
         if tracker is not None:
             tracker.ingest(action.get("command", ""), output.get("output", ""))
         return output
+
+
+class ToolsRunner:
+    def __init__(
+        self,
+        *,
+        dataset_root: Path,
+        repos_root: Path,
+        output_root: Path,
+        repos: list[str],
+        slice_spec: str,
+        shuffle: bool,
+        shuffle_seed: int,
+        workers: int,
+        config_path: Path,
+        tool_config_path: Path,
+        model: str | None,
+        model_class: str | None,
+        environment_class: str | None,
+        image: str | None,
+        output_model_name: str,
+        method: str,
+        output_dir: str,
+        redo_existing: bool,
+        indexes_root: str | None,
+        model_root: str | None,
+        pricing: dict[str, Any] | None,
+        billing: dict[str, Any] | None,
+    ) -> None:
+        self.dataset_root = dataset_root
+        self.repos_root = repos_root
+        self.output_root = output_root
+        self.repos = repos
+        self.slice_spec = slice_spec
+        self.shuffle = shuffle
+        self.shuffle_seed = shuffle_seed
+        self.workers = workers
+        self.config_path = config_path
+        self.tool_config_path = tool_config_path
+        self.model = model
+        self.model_class = model_class
+        self.environment_class = environment_class
+        self.image = image
+        self.output_model_name = output_model_name
+        self.method = method
+        self.output_dir = output_dir
+        self.redo_existing = redo_existing
+        self.indexes_root = indexes_root
+        self.model_root = model_root
+        self.pricing = pricing
+        self.billing = billing
+
+    def run(self) -> None:
+        run_tools(
+            dataset_root=self.dataset_root,
+            repos_root=self.repos_root,
+            output_root=self.output_root,
+            repos=",".join(self.repos),
+            slice_spec=self.slice_spec,
+            shuffle=self.shuffle,
+            shuffle_seed=self.shuffle_seed,
+            workers=self.workers,
+            config_path=self.config_path,
+            tool_config_path=self.tool_config_path,
+            model=self.model,
+            model_class=self.model_class,
+            environment_class=self.environment_class,
+            image=self.image,
+            output_model_name=self.output_model_name,
+            method=self.method,
+            output_dir=self.output_dir,
+            redo_existing=self.redo_existing,
+            indexes_root=self.indexes_root,
+            model_root=self.model_root,
+            pricing=self.pricing,
+            billing=self.billing,
+        )
 
 
 def _collect_repos(questions_dir: Path, repos_csv: str) -> list[str]:
@@ -141,8 +214,8 @@ def _default_output_dir(output_model_name: str, method: str) -> Path:
     return root_dir / "outputs" / output_model_name / method / timestamp
 
 
-def _get_answer_path(dataset_root: Path, output_model_name: str, method: str, repo: str) -> Path:
-    return dataset_root / "answers" / output_model_name / method / f"{repo}.jsonl"
+def _get_answer_path(output_root: Path, output_model_name: str, method: str, repo: str) -> Path:
+    return output_root / "answers" / output_model_name / method / f"{repo}.jsonl"
 
 
 def _get_environment(config: dict[str, Any], instance: dict[str, Any], repos_root: Path):
@@ -204,6 +277,7 @@ def process_instance(
     tool: CodeSearchTool,
     progress_manager: RunBatchProgressManager,
     dataset_root: Path,
+    output_root: Path,
     output_model_name: str,
     method: str,
     repos_root: Path,
@@ -215,7 +289,7 @@ def process_instance(
 
     model = get_model(config=config.get("model", {}))
     question = instance["question"]
-    answer_path = _get_answer_path(dataset_root, output_model_name, method, instance["repo"])
+    answer_path = _get_answer_path(output_root, output_model_name, method, instance["repo"])
 
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Starting container")
@@ -267,14 +341,17 @@ def process_instance(
 
     answer = _parse_answer(result) if exit_status == "Submitted" else ""
     relative_code_list = merge_relative_code_list(tool_registry.tool_candidates, tracker.paths)
+    stats = build_answer_stats(model)
 
     record = {
         "question": question,
         "answer": answer,
         "final_answer": answer,
         "relative_code_list": relative_code_list,
+        "stats": stats,
     }
     _append_answer_record(answer_path, record)
+    logger.info("Answer appended to: %s", answer_path)
 
     extra_info = {
         "repo": instance["repo"],
@@ -294,43 +371,38 @@ def process_instance(
     progress_manager.on_instance_end(instance_id, exit_status)
 
 
-# fmt: off
-@app.command(help=_HELP_TEXT)
-def main(
-    dataset_root: Path = typer.Option(..., "--dataset-root", help="Path to SWE-QA-Bench datasets root"),
-    repos_root: Path = typer.Option(..., "--repos-root", help="Path to SWE-QA-Bench repos root"),
-    repos: str = typer.Option("", "--repos", help="Comma-separated repo list"),
-    slice_spec: str = typer.Option("", "--slice", help="Slice spec, e.g. 0:20"),
-    shuffle: bool = typer.Option(False, "--shuffle", help="Shuffle instances"),
-    shuffle_seed: int = typer.Option(42, "--shuffle-seed", help="Random seed for shuffling"),
-    workers: int = typer.Option(1, "-w", "--workers", help="Number of worker threads"),
-    config_path: Path = typer.Option(
-        package_dir.parents[1] / "swe_qa_bench" / "config" / "agent_tools.yaml",
-        "-c",
-        "--config",
-        help="Path to agent config file",
-    ),
-    tool_config_path: Path = typer.Option(
-        package_dir.parents[1] / "swe_qa_bench" / "config" / "code_search.yaml",
-        "--tool-config",
-        help="Path to code_search config file",
-    ),
-    model: str | None = typer.Option(None, "-m", "--model", help="Model to use"),
-    model_class: str | None = typer.Option(None, "--model-class", help="Model class to use"),
-    environment_class: str | None = typer.Option(None, "--environment-class", help="Environment class override"),
-    image: str | None = typer.Option(None, "--image", help="Docker image override"),
-    output_model_name: str = typer.Option(..., "--output-model-name", help="Output model name (directory)"),
-    method: str = typer.Option("miniswe_tools", "--method", help="Method name"),
-    output_dir: str = typer.Option("", "--output-dir", help="Output directory for logs/trajectories"),
-    redo_existing: bool = typer.Option(False, "--redo-existing", help="Redo existing answers"),
+def run_tools(
+    dataset_root: Path,
+    repos_root: Path,
+    output_root: Path,
+    repos: str,
+    slice_spec: str,
+    shuffle: bool,
+    shuffle_seed: int,
+    workers: int,
+    config_path: Path,
+    tool_config_path: Path,
+    model: str | None,
+    model_class: str | None,
+    environment_class: str | None,
+    image: str | None,
+    output_model_name: str,
+    method: str,
+    output_dir: str,
+    redo_existing: bool,
+    indexes_root: str | None,
+    model_root: str | None,
+    pricing: dict[str, Any] | None,
+    billing: dict[str, Any] | None,
 ) -> None:
-    # fmt: on
     dataset_root = dataset_root.resolve()
     repos_root = repos_root.resolve()
+    output_root = output_root.resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
     if not dataset_root.exists():
-        raise typer.BadParameter(f"Dataset root not found: {dataset_root}")
+        raise ValueError(f"Dataset root not found: {dataset_root}")
     if not repos_root.exists():
-        raise typer.BadParameter(f"Repos root not found: {repos_root}")
+        raise ValueError(f"Repos root not found: {repos_root}")
     validate_output_model_name(output_model_name)
 
     config_path = get_config_path(config_path)
@@ -344,9 +416,17 @@ def main(
         config.setdefault("model", {})["model_name"] = model
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+    if pricing is not None:
+        config.setdefault("model", {})["pricing"] = pricing
+    if billing is not None:
+        config.setdefault("model", {})["billing"] = billing
 
     tool_config_path = get_config_path(tool_config_path)
     tool_config = yaml.safe_load(tool_config_path.read_text())
+    if indexes_root:
+        tool_config["index_root"] = str(indexes_root)
+    if model_root:
+        tool_config["embedding_model"] = str(model_root)
     tool = CodeSearchTool(tool_config)
 
     default_output_dir = _default_output_dir(output_model_name, method)
@@ -363,14 +443,14 @@ def main(
     instances, missing_questions, missing_repos = _build_instances(questions_dir, repos_root, repo_list)
     if missing_questions:
         missing_preview = ", ".join(missing_questions[:10])
-        raise typer.BadParameter(f"Missing question files (first 10): {missing_preview}")
+        raise ValueError(f"Missing question files (first 10): {missing_preview}")
     if missing_repos:
         missing_preview = ", ".join(missing_repos[:10])
-        raise typer.BadParameter(f"Missing repos (first 10): {missing_preview}")
+        raise ValueError(f"Missing repos (first 10): {missing_preview}")
 
     if not redo_existing:
         existing_by_repo = {
-            repo: _load_existing_questions(_get_answer_path(dataset_root, output_model_name, method, repo))
+            repo: _load_existing_questions(_get_answer_path(output_root, output_model_name, method, repo))
             for repo in repo_list
         }
         instances = [
@@ -409,6 +489,7 @@ def main(
                     tool,
                     progress_manager,
                     dataset_root,
+                    output_root,
                     output_model_name,
                     method,
                     repos_root,
@@ -418,7 +499,3 @@ def main(
             process_futures(futures)
 
     progress_manager.print_report()
-
-
-if __name__ == "__main__":
-    app()

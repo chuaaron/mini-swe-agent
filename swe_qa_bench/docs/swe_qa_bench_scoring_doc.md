@@ -23,6 +23,7 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score_from_yaml \
 
 ```yaml
 dataset_root: /path/to/SWE-QA-Bench/SWE-QA-Bench/datasets
+output_root: /path/to/mini-swe-agent/swe_qa_bench/results
 candidate_model: openai_deepseek-v3.2
 method: miniswe_bash
 judge_model: deepseek-v3.2
@@ -37,15 +38,17 @@ repos: ["requests"]
 - `candidate_model` + `method` 必须与 answers 输出路径一致。
 - `judge_api_base` 必须是完整的 `/v1/chat/completions` URL。
 - `repos` 为空时默认评分全部仓库。
+- 如未在 YAML 中填写 `judge_api_key`，会从 `local.yaml` 的 `env` 注入环境变量读取。
+- `output_root` 为空时会回退到 `local.yaml` 的 `paths.output_root`；再为空则回退到默认的 `swe_qa_bench/results`。
 
 ---
 
 ## 3. 输出路径
 
-评分输出写入：
+评分输出写入（已与数据集解耦）：
 
 ```
-SWE-QA-Bench/SWE-QA-Bench/datasets/scores/{MODEL}/{METHOD}/{repo}.jsonl
+mini-swe-agent/swe_qa_bench/results/scores/{MODEL}/{METHOD}/{repo}.jsonl
 ```
 
 ---
@@ -67,8 +70,7 @@ SWE-QA-Bench/SWE-QA-Bench/datasets/scores/{MODEL}/{METHOD}/{repo}.jsonl
 
 2) **评分为空或跳过**
 - 检查 answers 路径是否存在：
-  `datasets/answers/<model>/<method>/<repo>.jsonl`
+  `swe_qa_bench/results/answers/<model>/<method>/<repo>.jsonl`
 
 3) **单条快速评分**
 - 在 YAML 里设置 `repos: ["requests"]` 或 `repos: "requests"`。
-

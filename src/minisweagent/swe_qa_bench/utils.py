@@ -115,6 +115,25 @@ def validate_output_model_name(name: str) -> None:
         raise ValueError("output_model_name cannot contain path separators")
 
 
+def build_answer_stats(model: Any) -> dict[str, Any]:
+    stats: dict[str, Any] = {}
+    if hasattr(model, "get_billing_stats"):
+        try:
+            billing_stats = model.get_billing_stats()
+        except Exception:
+            billing_stats = {}
+        if isinstance(billing_stats, dict):
+            stats.update(billing_stats)
+    stats.setdefault("api_calls", getattr(model, "n_calls", 0))
+    stats.setdefault("cost_usd", getattr(model, "cost", 0.0))
+    model_config = getattr(model, "config", None)
+    model_name = getattr(model_config, "model_name", None) if model_config is not None else None
+    if model_name:
+        stats.setdefault("model_name", model_name)
+    stats.setdefault("model_class", model.__class__.__name__)
+    return stats
+
+
 def prepare_local_instances(instances: list[dict[str, Any]], worktree_root: Path) -> None:
     worktree_root = worktree_root.resolve()
     worktree_root.mkdir(parents=True, exist_ok=True)

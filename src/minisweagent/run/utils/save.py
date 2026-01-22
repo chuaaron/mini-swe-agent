@@ -61,6 +61,13 @@ def save_traj(
             "model_type": _get_class_name_with_module(agent.model),
             "environment_type": _get_class_name_with_module(agent.env),
         }
+        if hasattr(agent.model, "get_billing_stats"):
+            try:
+                billing_stats = agent.model.get_billing_stats()
+            except Exception:
+                billing_stats = {}
+            if isinstance(billing_stats, dict):
+                data["info"]["model_stats"].update(billing_stats)
     if extra_info:
         data["info"].update(extra_info)
 

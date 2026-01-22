@@ -253,10 +253,15 @@ def score_dataset(
     repos: list[str] | None,
     max_workers: int,
     timeout: int,
+    output_root: Path | None = None,
 ) -> None:
     reference_dir = dataset_root / "reference"
-    candidate_base = dataset_root / "answers" / candidate_model / method
-    output_base = dataset_root / "scores" / candidate_model / method
+    if output_root is None:
+        candidate_base = dataset_root / "answers" / candidate_model / method
+        output_base = dataset_root / "scores" / candidate_model / method
+    else:
+        candidate_base = output_root / "answers" / candidate_model / method
+        output_base = output_root / "scores" / candidate_model / method
 
     for repo in _iter_repos(reference_dir, repos):
         candidate_path = candidate_base / f"{repo}.jsonl"
