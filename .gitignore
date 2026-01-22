@@ -13,21 +13,34 @@ swe_qa_bench/config/score_*.yaml
 swe_qa_bench/config/local.yaml
 
 # generated locbench worktrees
-locbench/tool_worktrees/
-locbench/worktrees/
+locbench/tool_worktrees/*
+locbench/worktrees/*
 
 # locbench artifacts (models/indexes/outputs)
-locbench/models/
-locbench/indexes/
-locbench/outputs/
-locbench/loc_output/
+locbench/models/*
+locbench/indexes/*
+locbench/outputs/*
+locbench/loc_output/*
 
 # swe_qa_bench artifacts
-swe_qa_bench/indexes/
-swe_qa_bench/outputs/
-swe_qa_bench/models/
-swe_qa_bench/results/
-swe_qa_bench/worktrees/
+swe_qa_bench/indexes/*
+swe_qa_bench/outputs/*
+swe_qa_bench/models/*
+swe_qa_bench/results/*
+swe_qa_bench/worktrees/*
+
+# keep directory structure
+!locbench/tool_worktrees/.gitkeep
+!locbench/worktrees/.gitkeep
+!locbench/models/.gitkeep
+!locbench/indexes/.gitkeep
+!locbench/outputs/.gitkeep
+!locbench/loc_output/.gitkeep
+!swe_qa_bench/indexes/.gitkeep
+!swe_qa_bench/outputs/.gitkeep
+!swe_qa_bench/models/.gitkeep
+!swe_qa_bench/results/.gitkeep
+!swe_qa_bench/worktrees/.gitkeep
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
