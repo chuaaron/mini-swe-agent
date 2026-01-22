@@ -27,7 +27,6 @@ swe_qa_bench/indexes/*
 swe_qa_bench/outputs/*
 swe_qa_bench/models/*
 swe_qa_bench/results/*
-swe_qa_bench/worktrees/*
 
 # keep directory structure
 !locbench/tool_worktrees/.gitkeep
@@ -40,7 +39,6 @@ swe_qa_bench/worktrees/*
 !swe_qa_bench/outputs/.gitkeep
 !swe_qa_bench/models/.gitkeep
 !swe_qa_bench/results/.gitkeep
-!swe_qa_bench/worktrees/.gitkeep
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
