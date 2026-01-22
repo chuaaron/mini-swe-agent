@@ -115,6 +115,20 @@ def validate_output_model_name(name: str) -> None:
         raise ValueError("output_model_name cannot contain path separators")
 
 
+def prepare_local_instances(instances: list[dict[str, Any]], worktree_root: Path) -> None:
+    worktree_root = worktree_root.resolve()
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    for instance in instances:
+        repo_path = str(instance["repo_path"])
+        workdir = (worktree_root / instance["instance_id"]).resolve()
+        instance["repo_mount_path"] = repo_path
+        instance["repo_mount_path_q"] = shlex.quote(repo_path)
+        instance["workdir"] = str(workdir)
+        instance["workdir_q"] = shlex.quote(str(workdir))
+        instance["workdir_parent"] = str(worktree_root)
+        instance["workdir_parent_q"] = shlex.quote(str(worktree_root))
+
+
 def split_shell_segments(tokens: list[str]) -> list[list[str]]:
     segments: list[list[str]] = []
     current: list[str] = []

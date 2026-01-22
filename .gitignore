@@ -13,6 +13,7 @@ swe_qa_bench/config/score_*.yaml
 
 # generated locbench worktrees
 locbench/tool_worktrees/
+locbench/worktrees/
 
 # locbench artifacts (models/indexes/outputs)
 locbench/models/

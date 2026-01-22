@@ -256,23 +256,31 @@ def append_loc_output(path: Path, record: dict[str, Any]) -> None:
 
 def get_locbench_environment(config: dict[str, Any], instance: dict[str, Any], repo_root: Path) -> Any:
     env_config = copy.deepcopy(config.get("environment", {}))
-    env_config["environment_class"] = env_config.get("environment_class", "docker")
-    if env_config["environment_class"] != "docker":
-        raise ValueError("LocBench runner currently supports the docker environment only.")
+    env_class = env_config.get("environment_class", "docker")
+    env_config["environment_class"] = env_class
+    if env_class == "docker":
+        image = env_config.get("image")
+        if image is None:
+            raise ValueError("Docker image must be set for locbench.")
+        env_config["image"] = image
 
-    image = env_config.get("image")
-    if image is None:
-        raise ValueError("Docker image must be set for locbench.")
-    env_config["image"] = image
+        run_args = list(env_config.get("run_args", ["--rm"]))
+        if "--rm" not in run_args:
+            run_args.insert(0, "--rm")
 
-    run_args = list(env_config.get("run_args", ["--rm"]))
-    if "--rm" not in run_args:
-        run_args.insert(0, "--rm")
-
-    mount_arg = f"{repo_root}:/repos:ro"
-    if mount_arg not in run_args:
-        run_args.extend(["-v", mount_arg])
-    env_config["run_args"] = run_args
+        mount_arg = f"{repo_root}:/repos:ro"
+        if mount_arg not in run_args:
+            run_args.extend(["-v", mount_arg])
+        env_config["run_args"] = run_args
+    elif env_class == "local":
+        env_config = {
+            "environment_class": "local",
+            "cwd": env_config.get("cwd", ""),
+            "timeout": env_config.get("timeout", 60),
+            "env": env_config.get("env", {}),
+        }
+    else:
+        raise ValueError(f"LocBench runner only supports docker or local (got: {env_class}).")
 
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):
@@ -392,6 +400,20 @@ def build_instances(
     return instances, missing_repos
 
 
+def _prepare_local_instances(instances: list[dict[str, Any]], worktree_root: Path) -> None:
+    worktree_root = worktree_root.resolve()
+    worktree_root.mkdir(parents=True, exist_ok=True)
+    for instance in instances:
+        repo_path = instance["repo_path"]
+        workdir = (worktree_root / instance["instance_id"]).resolve()
+        instance["repo_mount_path"] = repo_path
+        instance["repo_mount_path_q"] = shlex.quote(str(repo_path))
+        instance["workdir"] = str(workdir)
+        instance["workdir_q"] = shlex.quote(str(workdir))
+        instance["workdir_parent"] = str(worktree_root)
+        instance["workdir_parent_q"] = shlex.quote(str(worktree_root))
+
+
 def default_paths(model_name: str) -> tuple[Path, Path]:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     root_dir = package_dir.parents[1] / "locbench"
@@ -440,6 +462,15 @@ def main(
         config.setdefault("model", {})["model_name"] = model
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
+    env_class = config.get("environment", {}).get("environment_class", "docker")
+    if env_class == "local":
+        config.setdefault("run", {})["env_startup_command"] = (
+            "mkdir -p {{ workdir_parent_q }} && "
+            "rm -rf {{ workdir_q }} && "
+            "git -c safe.directory=* clone --no-hardlinks {{ repo_mount_path_q }} {{ workdir_q }} && "
+            "cd {{ workdir_q }} && "
+            "git checkout -q {{ base_commit_q }}"
+        )
 
     model_name = get_model_name(model, config.get("model", {}))
     default_output_dir, default_loc_output = default_paths(model_name)
@@ -475,6 +506,9 @@ def main(
         if existing_ids:
             logger.info(f"Skipping {len(existing_ids)} existing instances from {loc_output_path}")
             instances = [instance for instance in instances if instance["instance_id"] not in existing_ids]
+    if env_class == "local":
+        worktree_root = package_dir.parents[1] / "locbench" / "worktrees"
+        _prepare_local_instances(instances, worktree_root)
     logger.info(f"Running on {len(instances)} instances...")
 
     progress_manager = RunBatchProgressManager(len(instances), output_dir / f"exit_statuses_{time.time()}.yaml")

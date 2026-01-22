@@ -5,6 +5,16 @@
 
 ---
 
+## 文档索引（建议先看）
+
+- `swe_qa_bench/docs/swe_qa_bench_runbook.md`：运行命令汇总
+- `swe_qa_bench/docs/swe_qa_bench_env_setup.md`：环境配置与迁移
+- `swe_qa_bench/docs/swe_qa_bench_methods_design_doc.md`：方法设计总览
+- `swe_qa_bench/docs/swe_qa_bench_scoring_doc.md`：评分流程与配置
+- `swe_qa_bench/docs/swe_qa_bench_index_doc.md`：tools 索引构建
+
+---
+
 ## 0. 背景与当前已有能力
 
 **背景**
@@ -23,7 +33,7 @@
 
 **迁移原则**
 - SWE-QA-Bench 测评应与 LocBench 平行建设，代码与配置放在独立目录，不共享输出路径。
-- 输出写入 SWE-QA-Bench 原生 `datasets/answers/...`，评分仍用官方 `score/`。
+- 输出写入 SWE-QA-Bench 原生 `datasets/answers/...`，评分逻辑迁移到 mini-swe-agent 内部实现。
 
 ---
 
@@ -327,58 +337,20 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score \
 
 ---
 
-## 11. TODO - 评分脚本兼容性修改
+## 11. 实现状态（已完成）
 
-目标：在不改评分逻辑核心算法的前提下，修复字段不一致问题。
-
-执行清单（可执行）：
-- [ ] 备份 `SWE-QA-Bench/SWE-QA-Bench/score/main.py`（保留原始版本）。
-- [ ] 在 reference 读取处加入 fallback：
-  - 读取 `aggregated_answer` 失败时，回退到 `answer`。
-  - 回退值必须写成列表：`[answer]`。
-- [ ] 在 candidate 读取处加入 fallback：
-  - 若 `final_answer` 缺失，回退到 `answer`（不影响冗余写入）。
-- [ ] 添加最小化验证：
-  - 输入：只包含 `answer` 的 reference JSONL。
-  - 期望：reference_dict 非空。
-- [ ] 记录修改说明（commit message 或变更记录）。
+已落地的模块与入口：
+- Runner：`src/minisweagent/swe_qa_bench/runners/bash_runner.py` / `tools_runner.py`
+- YAML 运行入口：`src/minisweagent/swe_qa_bench/run_from_yaml.py`
+- 评分模块：`src/minisweagent/swe_qa_bench/score.py`
+- 评分入口：`src/minisweagent/swe_qa_bench/score_from_yaml.py`
+- 索引构建：`src/minisweagent/swe_qa_bench/build_index.py`
+- 工具配置：`swe_qa_bench/config/code_search.yaml`
+- 输出规范：`answer` + `final_answer` 冗余写入，`relative_code_list` 保序去重且最多 50 条
 
 ---
 
-## 12. TODO - SWE-QA-Bench runner 设计/实现
-
-目标：完成 bash-only 与 tools 两套 runner，输出严格对齐官方结构。
-
-执行清单（可执行）：
-- [ ] 新建模块目录：`src/minisweagent/swe_qa_bench/` 与 `runners/`。
-- [ ] 实现 `bash_runner.py`：
-  - 读取 `datasets/questions/{repo}.jsonl`。
-  - Docker 容器只读挂载 `datasets/repos` 到 `/repos`。
-  - prompt 输出 JSON：`{"answer": "..."}`。
-  - 写出 JSONL：包含 `question`、`answer`、`final_answer`、`relative_code_list`。
-- [ ] 实现 `tools_runner.py`：
-  - 同 bash_runner，但允许 `@tool code_search`。
-  - 记录 `tool_candidates`（code_search 返回文件）。
-  - 记录 `files_read`（bash 读取文件）。
-  - `relative_code_list` = Unique(`tool_candidates` + `files_read`)。
-- [ ] 实现 `relative_code_list` 采集与截断：
-  - 保序去重，最多 50 条，末尾 `"<<TRUNCATED>>"`。
-- [ ] 新建 SWE-QA-Bench 专用配置：
-  - `swe_qa_bench/config/code_search.yaml`。
-- [ ] 新建 SWE-QA-Bench prompt：
-  - bash-only 与 tools 分别配置。
-- [ ] CLI 接入：暂不做（仅实现可独立调用的 runner）。
-- [ ] 输出目录命名：
-  - 强制 `--output-model-name`。
-  - answers 路径：`datasets/answers/{output_model_name}/{method}/{repo}.jsonl`。
-- [ ] 并发写入保护：
-  - repo 级 file lock 或队列。
-- [ ] 最小化联调：
-  - 单 repo、单问题，验证输出格式与评分脚本读取无误。
-
----
-
-## 13. 迁移注意事项
+## 12. 迁移注意事项
 
 迁移到服务器时，确保：
 - `datasets/questions/` 与 `datasets/reference/` 完整
@@ -388,7 +360,7 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score \
 
 ---
 
-## 14. 实现要点（已定稿）
+## 13. 关键规则（当前实现）
 
 - `score/main.py` 加入 `aggregated_answer` fallback 到 `answer`（列表化）
 - `score/main.py` 加入 `final_answer` fallback 到 `answer`
