@@ -1,0 +1,20 @@
+# LocBench local config (ignored by git).
+# Copy to local.yaml and fill in your machine-specific paths/secrets.
+
+paths:
+  # Required: LocBench dataset JSONL
+  dataset_root: /abs/path/to/Loc-Bench_V1_dataset.jsonl
+
+  # Required: local repo mirrors (locbench_repos)
+  repos_root: /abs/path/to/locbench_repos
+
+  # Optional: local indexes/models/output roots
+  # indexes_root: /abs/path/to/locbench/indexes
+  # model_root: /abs/path/to/locbench/models/CodeRankEmbed
+  # output_root: /abs/path/to/locbench/results
+  # worktrees_root: /abs/path/to/locbench/worktrees
+  # output_model_name: openai_deepseek-v3.2
+
+env:
+  OPENAI_API_KEY: sk-your-key
+  OPENAI_API_BASE: https://api.chatanywhere.tech/v1/chat/completions

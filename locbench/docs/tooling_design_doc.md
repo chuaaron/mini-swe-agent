@@ -3,7 +3,7 @@
 本文档为**独立设计文档**，描述如何在不修改原版 `DefaultAgent` 的前提下，
 新增"一级工具"（与 bash 同级）的检索能力，用于后续接入自研 code_search。
 
-方法总览请参考：`locbench/locbench_methods_design_doc.md`。
+方法总览请参考：`locbench/docs/locbench_methods_design_doc.md`。
 
 ---
 

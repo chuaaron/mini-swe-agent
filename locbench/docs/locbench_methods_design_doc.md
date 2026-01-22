@@ -31,8 +31,8 @@
 ## 3. 方法一：Bash-only（基线）
 
 **入口**
-- Runner：`src/minisweagent/run/extra/locbench.py`
-- Prompt：`src/minisweagent/config/extra/locbench.yaml`
+- Runner：`src/minisweagent/run_locbench.py`（mode=bash）
+- Prompt：`locbench/config/agent_bash.yaml`
 
 **执行流程**
 1. 容器启动后挂载 `/repos`（只读）
@@ -50,9 +50,9 @@
 ## 4. 方法二：Tools（bash + code_search）
 
 **入口**
-- Runner：`src/minisweagent/run/extra/locbench_tools.py`
-- Prompt：`src/minisweagent/config/extra/locbench_tools.yaml`
-- 工具配置：`src/minisweagent/config/extra/code_search.yaml`
+- Runner：`src/minisweagent/run_locbench.py`（mode=tools）
+- Prompt：`locbench/config/agent_tools.yaml`
+- 工具配置：`locbench/config/code_search.yaml`
 
 **核心组件**
 - `ToolAgent`：支持 `@tool` 命令拦截
@@ -75,7 +75,7 @@
 ## 5. 方法三：IR-only（纯检索）
 
 **入口**
-- Runner：`src/minisweagent/run/extra/locbench_code_search.py`
+- Runner：`src/minisweagent/run_locbench.py`（mode=ir）
 
 **执行流程**
 1. 对每条实例构造 worktree（checkout 到 `base_commit`）
@@ -119,8 +119,8 @@
 ## 8. 输出与评估
 
 **输出路径**
-- bash/tools：`locbench/outputs/...` + `locbench/loc_output/...`
-- IR-only：`locbench/loc_output/code_search/...`
+- bash/tools：`locbench/outputs/...` + `locbench/results/loc_output/...`
+- IR-only：`locbench/results/loc_output/...`
 
 **评估脚本**
 - `evaluation/simple_eval.py`
@@ -135,4 +135,3 @@
 
 随机对比建议：
 - 使用 `--shuffle --shuffle-seed` 固定样本集
-

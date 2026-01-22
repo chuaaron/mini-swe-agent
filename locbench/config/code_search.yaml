@@ -1,0 +1,11 @@
+chunker: sliding
+chunk_size: 800
+overlap: 200
+embedding_provider: local
+embedding_model: ""
+embedding_batch_size: 64
+embedding_max_length: 4096
+embedding_device: cpu
+trust_remote_code: true
+index_root: ""
+max_file_size: 524288

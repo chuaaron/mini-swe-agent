@@ -25,14 +25,7 @@
     locbench/indexes/...
 ```
 
-可通过环境变量统一配置：
-
-```bash
-export LOCBENCH_ROOT=/data/locbench
-export MINISWE_ROOT=$LOCBENCH_ROOT/mini-swe-agent
-export LOCBENCH_DATASET=$LOCBENCH_ROOT/data/Loc-Bench_V1_dataset.jsonl
-export LOCBENCH_REPOS=$LOCBENCH_ROOT/locbench_repos
-```
+推荐在 `locbench/config/local.yaml` 中维护路径，迁移时只改这一处。
 
 ---
 
@@ -57,20 +50,17 @@ pip install networkx
 
 ---
 
-## 4. 全局配置与 API Key
+## 4. API Key 与本地配置
 
-mini-swe-agent 使用全局 `.env`，位置可由 `MSWEA_GLOBAL_CONFIG_DIR` 指定。
-
+复制并编辑本地配置：
 ```bash
-export MSWEA_GLOBAL_CONFIG_DIR=$MINISWE_ROOT/.config
-mini-extra config setup
+cp locbench/config/local.yaml.example locbench/config/local.yaml
 ```
 
-或直接设置环境变量：
-```bash
-export MSWEA_MODEL_NAME=openai/deepseek-v3.2
-export OPENAI_API_KEY=sk-...
-```
+在 `locbench/config/local.yaml` 中设置：
+- `paths.dataset_root`
+- `paths.repos_root`
+- `env.OPENAI_API_KEY`
 
 ---
 
@@ -92,14 +82,11 @@ docker build -t locbench-minisweagent:latest -f locbench/Dockerfile .
 - 本地模型目录（如 `locbench/models/CodeRankEmbed`）
 - 预建索引目录（如 `locbench/indexes/...`）
 
-迁移后更新配置文件：
-`src/minisweagent/config/extra/code_search.yaml`
-
-关键字段示例：
+迁移后更新 `locbench/config/local.yaml` 中的路径：
 ```yaml
-embedding_model: /data/locbench/mini-swe-agent/locbench/models/CodeRankEmbed
-index_root: /data/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code
-trust_remote_code: true
+paths:
+  model_root: /data/locbench/mini-swe-agent/locbench/models/CodeRankEmbed
+  indexes_root: /data/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code
 ```
 
 如需离线运行，可设置：
@@ -132,13 +119,12 @@ export HF_HOME=$MINISWE_ROOT/locbench/models
 
 ## 9. 运行与清理
 
-- 输出目录：`$MINISWE_ROOT/locbench/outputs/` 与 `loc_output/`
-- worktree 目录：`$MINISWE_ROOT/locbench/tool_worktrees/`
+- 输出目录：`$MINISWE_ROOT/locbench/outputs/` 与 `results/loc_output/`
+- worktree 目录：`$MINISWE_ROOT/locbench/worktrees/`
 
 需要清理时：
 ```bash
-rm -rf $MINISWE_ROOT/locbench/tool_worktrees
+rm -rf $MINISWE_ROOT/locbench/worktrees
 rm -rf $MINISWE_ROOT/locbench/outputs/*
-rm -rf $MINISWE_ROOT/locbench/loc_output/*
+rm -rf $MINISWE_ROOT/locbench/results/loc_output/*
 ```
-

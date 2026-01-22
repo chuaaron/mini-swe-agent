@@ -5,9 +5,9 @@
 本文件仅覆盖 **bash-only 基线**。
 
 相关总览文档：
-- `locbench/locbench_runbook.md`（运行命令汇总）
-- `locbench/locbench_methods_design_doc.md`（方法设计）
-- `locbench/locbench_env_setup.md`（环境配置与迁移）
+- `locbench/docs/locbench_runbook.md`（运行命令汇总）
+- `locbench/docs/locbench_methods_design_doc.md`（方法设计）
+- `locbench/docs/locbench_env_setup.md`（环境配置与迁移）
 
 ---
 
@@ -30,10 +30,11 @@
 ## 2. 当前实现文件
 
 **Runner（批量执行）**
-- `mini-swe-agent/src/minisweagent/run/extra/locbench.py`
+- `mini-swe-agent/src/minisweagent/run_locbench.py`
+- `mini-swe-agent/src/minisweagent/locbench/runners/bash_runner.py`
 
 **Prompt 配置**
-- `mini-swe-agent/src/minisweagent/config/extra/locbench.yaml`
+- `mini-swe-agent/locbench/config/agent_bash.yaml`
   - 强化单步协议（一个 THOUGHT + 一个 bash block + 一个命令）
   - 明确“只定位、不修改”
 
@@ -44,7 +45,7 @@
 
 **输出目录**
 - `mini-swe-agent/locbench/outputs/`
-- `mini-swe-agent/locbench/loc_output/`
+- `mini-swe-agent/locbench/results/loc_output/`
 
 ---
 
@@ -84,9 +85,8 @@ docker build -t locbench-minisweagent:latest -f locbench/Dockerfile .
 ### 单条测试（推荐）
 ```bash
 cd /Users/chz/code/locbench/mini-swe-agent
-PYTHONPATH=src python src/minisweagent/run/extra/locbench.py \
-  --dataset /Users/chz/code/locbench/data/Loc-Bench_V1_dataset.jsonl \
-  --repos-root /Users/chz/code/locbench/locbench_repos \
+PYTHONPATH=src python -m minisweagent.run_locbench \
+  --mode bash \
   --slice 0:1 \
   --workers 1 \
   --redo-existing
@@ -94,17 +94,15 @@ PYTHONPATH=src python src/minisweagent/run/extra/locbench.py \
 
 ### 批量运行
 ```bash
-PYTHONPATH=src python src/minisweagent/run/extra/locbench.py \
-  --dataset /Users/chz/code/locbench/data/Loc-Bench_V1_dataset.jsonl \
-  --repos-root /Users/chz/code/locbench/locbench_repos \
+PYTHONPATH=src python -m minisweagent.run_locbench \
+  --mode bash \
   --workers 4
 ```
 
 ### 指定模型
 ```bash
-PYTHONPATH=src python src/minisweagent/run/extra/locbench.py \
-  --dataset /Users/chz/code/locbench/data/Loc-Bench_V1_dataset.jsonl \
-  --repos-root /Users/chz/code/locbench/locbench_repos \
+PYTHONPATH=src python -m minisweagent.run_locbench \
+  --mode bash \
   --model openai/deepseek-v3.2 \
   --workers 2
 ```
@@ -119,21 +117,21 @@ mini-extra locbench --help
 ## 6. 输出与评估
 
 **输出路径**
-- 轨迹：`mini-swe-agent/locbench/outputs/<model>/<timestamp>/<instance_id>/<instance_id>.traj.json`
-- 日志：`mini-swe-agent/locbench/outputs/<model>/<timestamp>/minisweagent.log`
-- 结果：`mini-swe-agent/locbench/loc_output/<model>/loc_outputs_<timestamp>.jsonl`
+- 轨迹：`mini-swe-agent/locbench/outputs/<model>/<method>/<timestamp>/<instance_id>/<instance_id>.traj.json`
+- 日志：`mini-swe-agent/locbench/outputs/<model>/<method>/<timestamp>/minisweagent.log`
+- 结果：`mini-swe-agent/locbench/results/loc_output/<model>/<method>/loc_outputs_<timestamp>.jsonl`
 
 **简单评估**
 ```bash
 python /Users/chz/code/locbench/evaluation/simple_eval.py \
-  /Users/chz/code/locbench/mini-swe-agent/locbench/loc_output/<model>/loc_outputs_<timestamp>.jsonl \
+  /Users/chz/code/locbench/mini-swe-agent/locbench/results/loc_output/<model>/<method>/loc_outputs_<timestamp>.jsonl \
   /Users/chz/code/locbench/data/Loc-Bench_V1_dataset.jsonl
 ```
 
 **完整评估**
 ```bash
 python /Users/chz/code/locbench/evaluation/compute_full_metrics.py \
-  /Users/chz/code/locbench/mini-swe-agent/locbench/loc_output/<model>/loc_outputs_<timestamp>.jsonl \
+  /Users/chz/code/locbench/mini-swe-agent/locbench/results/loc_output/<model>/<method>/loc_outputs_<timestamp>.jsonl \
   /Users/chz/code/locbench/data/Loc-Bench_V1_dataset.jsonl
 ```
 

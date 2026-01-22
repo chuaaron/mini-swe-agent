@@ -41,6 +41,17 @@ def main():
     if len(args) == 0 or len(args) == 1 and args[0] in ["-h", "--help"]:
         return Console().print(get_docstring())
 
+    if args[0] in ["locbench", "locbench-tools", "locbench-code-search"]:
+        from minisweagent.run_locbench import main as run_locbench_main
+
+        mode_map = {
+            "locbench": "bash",
+            "locbench-tools": "tools",
+            "locbench-code-search": "ir",
+        }
+        run_locbench_main(["--mode", mode_map[args[0]], *args[1:]])
+        return
+
     for module_path, aliases, _ in subcommands:
         if args[0] in aliases:
             return import_module(module_path).app(args[1:], prog_name=f"mini-extra {aliases[0]}")

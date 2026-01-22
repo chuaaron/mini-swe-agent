@@ -11,6 +11,7 @@ swe_qa_bench/config/run_*.yaml
 swe_qa_bench/config/run_example.yaml
 swe_qa_bench/config/score_*.yaml
 swe_qa_bench/config/local.yaml
+locbench/config/local.yaml
 
 # generated locbench worktrees
 locbench/tool_worktrees/*
@@ -21,6 +22,7 @@ locbench/models/*
 locbench/indexes/*
 locbench/outputs/*
 locbench/loc_output/*
+locbench/results/*
 
 # swe_qa_bench artifacts
 swe_qa_bench/indexes/*
@@ -35,6 +37,9 @@ swe_qa_bench/results/*
 !locbench/indexes/.gitkeep
 !locbench/outputs/.gitkeep
 !locbench/loc_output/.gitkeep
+!locbench/results/.gitkeep
+!locbench/results/loc_output/.gitkeep
+!locbench/results/scores/.gitkeep
 !swe_qa_bench/indexes/.gitkeep
 !swe_qa_bench/outputs/.gitkeep
 !swe_qa_bench/models/.gitkeep
