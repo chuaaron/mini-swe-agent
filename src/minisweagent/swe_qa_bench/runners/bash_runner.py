@@ -45,8 +45,9 @@ class ProgressTrackingAgent(DefaultAgent):
         self.instance_id = instance_id
 
     def step(self) -> dict:
+        tokens = getattr(self.model, "total_tokens", 0)
         self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            self.instance_id, f"Step {self.model.n_calls + 1:3d} ({tokens} toks)"
         )
         return super().step()
 
@@ -391,8 +392,6 @@ def run_bash(
         config.setdefault("model", {})["model_name"] = model
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
-    if pricing is not None:
-        config.setdefault("model", {})["pricing"] = pricing
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
 

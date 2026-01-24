@@ -60,8 +60,9 @@ class ProgressTrackingAgent(DefaultAgent):
 
     def step(self) -> dict:
         """Override step to provide progress updates."""
+        tokens = getattr(self.model, "total_tokens", 0)
         self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            self.instance_id, f"Step {self.model.n_calls + 1:3d} ({tokens} toks)"
         )
         return super().step()
 

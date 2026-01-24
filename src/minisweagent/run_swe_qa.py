@@ -211,11 +211,8 @@ def main() -> None:
 
     model_name = _normalize_optional(model_cfg.get("model_name"))
     model_class = _normalize_optional(model_cfg.get("model_class"))
-    pricing = config.get("pricing")
     billing = config.get("billing")
-    if model_class != "chatanywhere":
-        pricing = None
-        billing = None
+    pricing = None
 
     root = project_root()
     default_agent = root / "swe_qa_bench" / "config" / ("agent_tools.yaml" if mode == "tools" else "agent_bash.yaml")

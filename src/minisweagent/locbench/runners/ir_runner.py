@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +70,7 @@ class IRRunner:
         force_rebuild: bool,
         redo_existing: bool,
         keep_worktrees: bool,
+        worktrees_mode: str,
     ) -> None:
         self.dataset_path = dataset_path
         self.repos_root = repos_root
@@ -94,6 +97,7 @@ class IRRunner:
         self.force_rebuild = force_rebuild
         self.redo_existing = redo_existing
         self.keep_worktrees = keep_worktrees
+        self.worktrees_mode = worktrees_mode
 
     def run(self) -> None:
         run_ir(
@@ -122,6 +126,7 @@ class IRRunner:
             force_rebuild=self.force_rebuild,
             redo_existing=self.redo_existing,
             keep_worktrees=self.keep_worktrees,
+            worktrees_mode=self.worktrees_mode,
         )
 
 
@@ -140,9 +145,13 @@ def _default_loc_output(output_root: Path, output_model_name: str, method: str) 
     return output_root / "loc_output" / model_dir / method_dir / f"loc_outputs_{timestamp}.jsonl"
 
 
-def _run_git(repo_path: Path, args: list[str]) -> str:
+def _run_git_raw(repo_path: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     cmd = ["git", "-c", "safe.directory=*", "-C", str(repo_path), *args]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+def _run_git(repo_path: Path, args: list[str]) -> str:
+    result = _run_git_raw(repo_path, args, check=True)
     return result.stdout.strip()
 
 
@@ -160,20 +169,69 @@ def _remove_worktree(repo_path: Path, worktree_path: Path) -> None:
         shutil.rmtree(worktree_path, ignore_errors=True)
 
 
-def ensure_worktree(repo_path: Path, repo_dir: str, base_commit: str, worktree_root: Path) -> tuple[Path, str]:
-    commit = _resolve_commit(repo_path, base_commit)
-    worktree_path = worktree_root / f"{repo_dir}@{commit[:8]}"
-    with _WORKTREE_LOCK:
-        if worktree_path.exists():
-            try:
-                head = _run_git(worktree_path, ["rev-parse", "HEAD"])
-                if head == commit:
-                    return worktree_path, commit
-            except subprocess.SubprocessError:
+def _prune_worktrees(repo_path: Path) -> None:
+    _run_git_raw(repo_path, ["worktree", "prune"], check=False)
+
+
+def _build_worktree_path(worktree_root: Path, repo_dir: str, commit: str, mode: str) -> Path:
+    if mode == "ephemeral":
+        unique_id = uuid.uuid4().hex[:8]
+        return worktree_root / f"{repo_dir}@{commit[:8]}_{unique_id}"
+    return worktree_root / f"{repo_dir}@{commit[:8]}"
+
+
+def _worktree_add_with_retry(repo_path: Path, worktree_path: Path, commit: str, *, retries: int = 5) -> None:
+    delay = 0.5
+    for attempt in range(retries):
+        try:
+            _run_git_raw(repo_path, ["worktree", "add", "--detach", str(worktree_path), commit], check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr or ""
+            stderr_lower = stderr.lower()
+            if "already registered worktree" in stderr:
+                _remove_worktree(repo_path, worktree_path)
+                _prune_worktrees(repo_path)
+            elif "index.lock" in stderr_lower:
                 pass
+            else:
+                raise
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay + random.uniform(0, 0.5))
+            delay *= 2
+
+
+def ensure_worktree(
+    repo_path: Path,
+    repo_dir: str,
+    base_commit: str,
+    worktree_root: Path,
+    *,
+    worktrees_mode: str,
+) -> tuple[Path, str]:
+    commit = _resolve_commit(repo_path, base_commit)
+    mode = worktrees_mode.strip().lower() if worktrees_mode else "reusable"
+    if mode not in {"ephemeral", "reusable"}:
+        raise ValueError(f"Invalid worktrees_mode: {mode}")
+    worktree_path = _build_worktree_path(worktree_root, repo_dir, commit, mode)
+    with _WORKTREE_LOCK:
+        _prune_worktrees(repo_path)
+        if mode == "reusable":
+            if worktree_path.exists():
+                try:
+                    head = _run_git(worktree_path, ["rev-parse", "HEAD"])
+                    if head == commit:
+                        return worktree_path, commit
+                except subprocess.SubprocessError:
+                    pass
+                _remove_worktree(repo_path, worktree_path)
+            else:
+                _remove_worktree(repo_path, worktree_path)
+        else:
             _remove_worktree(repo_path, worktree_path)
         worktree_root.mkdir(parents=True, exist_ok=True)
-        _run_git(repo_path, ["worktree", "add", "--detach", str(worktree_path), commit])
+        _worktree_add_with_retry(repo_path, worktree_path, commit)
     return worktree_path, commit
 
 
@@ -268,6 +326,7 @@ def run_ir(
     force_rebuild: bool,
     redo_existing: bool,
     keep_worktrees: bool,
+    worktrees_mode: str,
 ) -> None:
     dataset_path = dataset_path.resolve()
     repos_root = repos_root.resolve()
@@ -330,12 +389,20 @@ def run_ir(
             repo_path = Path(instance["repo_path"])
             base_commit = instance["base_commit"]
             exit_status = "Completed"
+            worktree_path: Path | None = None
+            mapper_root: Path | None = None
 
             progress_manager.on_instance_start(instance_id)
             progress_manager.update_instance_status(instance_id, "Preparing worktree")
 
             try:
-                worktree_path, resolved_commit = ensure_worktree(repo_path, repo_dir, base_commit, worktrees_root)
+                worktree_path, resolved_commit = ensure_worktree(
+                    repo_path,
+                    repo_dir,
+                    base_commit,
+                    worktrees_root,
+                    worktrees_mode=worktrees_mode,
+                )
 
                 if force_rebuild:
                     index_dir = _get_index_dir(config, repo_dir, resolved_commit)
@@ -405,7 +472,14 @@ def run_ir(
                     "found_entities": found_entities,
                     "raw_output_loc": [],
                     "meta_data": build_meta(bench_data.get(instance_id)),
-                    "stats": {"api_calls": 0, "cost_usd": 0.0, "billing_mode": "none"},
+                    "stats": {
+                        "api_calls": 0,
+                        "cost_usd": 0.0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "billing_mode": "none",
+                    },
                 }
                 _append_loc_output(loc_output_path, output_record)
             except Exception as exc:
@@ -419,13 +493,29 @@ def run_ir(
                     "raw_output_loc": [],
                     "error": str(exc),
                     "meta_data": build_meta(bench_data.get(instance_id)),
-                    "stats": {"api_calls": 0, "cost_usd": 0.0, "billing_mode": "none"},
+                    "stats": {
+                        "api_calls": 0,
+                        "cost_usd": 0.0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "billing_mode": "none",
+                    },
                 }
                 _append_loc_output(loc_output_path, output_record)
             finally:
+                if not keep_worktrees:
+                    if mapper_root and mapper_root.exists():
+                        shutil.rmtree(mapper_root, ignore_errors=True)
+                    if worktree_path:
+                        _remove_worktree(repo_path, worktree_path)
                 progress_manager.on_instance_end(instance_id, exit_status)
 
     if not keep_worktrees and worktrees_root.exists():
-        shutil.rmtree(worktrees_root, ignore_errors=True)
+        try:
+            if not any(worktrees_root.iterdir()):
+                worktrees_root.rmdir()
+        except OSError:
+            pass
 
     progress_manager.print_report()

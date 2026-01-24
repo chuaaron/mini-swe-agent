@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import random
 import shlex
 import shutil
 import subprocess
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -53,8 +55,9 @@ class ProgressTrackingAgent(ToolAgent):
         self.instance_id = instance_id
 
     def step(self) -> dict:
+        tokens = getattr(self.model, "total_tokens", 0)
         self.progress_manager.update_instance_status(
-            self.instance_id, f"Step {self.model.n_calls + 1:3d} (${self.model.cost:.2f})"
+            self.instance_id, f"Step {self.model.n_calls + 1:3d} ({tokens} toks)"
         )
         return super().step()
 
@@ -86,6 +89,7 @@ class ToolsRunner:
         indexes_root: str | None,
         model_root: str | None,
         keep_worktrees: bool,
+        worktrees_mode: str,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -112,6 +116,7 @@ class ToolsRunner:
         self.indexes_root = indexes_root
         self.model_root = model_root
         self.keep_worktrees = keep_worktrees
+        self.worktrees_mode = worktrees_mode
         self.pricing = pricing
         self.billing = billing
 
@@ -140,6 +145,7 @@ class ToolsRunner:
             indexes_root=self.indexes_root,
             model_root=self.model_root,
             keep_worktrees=self.keep_worktrees,
+            worktrees_mode=self.worktrees_mode,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -160,9 +166,13 @@ def _default_loc_output(output_root: Path, output_model_name: str, method: str) 
     return output_root / "loc_output" / model_dir / method_dir / f"loc_outputs_{timestamp}.jsonl"
 
 
-def _run_git(repo_path: Path, args: list[str]) -> str:
+def _run_git_raw(repo_path: Path, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     cmd = ["git", "-c", "safe.directory=*", "-C", str(repo_path), *args]
-    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+def _run_git(repo_path: Path, args: list[str]) -> str:
+    result = _run_git_raw(repo_path, args, check=True)
     return result.stdout.strip()
 
 
@@ -180,20 +190,69 @@ def _remove_worktree(repo_path: Path, worktree_path: Path) -> None:
         shutil.rmtree(worktree_path, ignore_errors=True)
 
 
-def ensure_worktree(repo_path: Path, repo_dir: str, base_commit: str, worktree_root: Path) -> tuple[Path, str]:
-    commit = _resolve_commit(repo_path, base_commit)
-    worktree_path = worktree_root / f"{repo_dir}@{commit[:8]}"
-    with _WORKTREE_LOCK:
-        if worktree_path.exists():
-            try:
-                head = _run_git(worktree_path, ["rev-parse", "HEAD"])
-                if head == commit:
-                    return worktree_path, commit
-            except subprocess.SubprocessError:
+def _prune_worktrees(repo_path: Path) -> None:
+    _run_git_raw(repo_path, ["worktree", "prune"], check=False)
+
+
+def _build_worktree_path(worktree_root: Path, repo_dir: str, commit: str, mode: str) -> Path:
+    if mode == "ephemeral":
+        unique_id = uuid.uuid4().hex[:8]
+        return worktree_root / f"{repo_dir}@{commit[:8]}_{unique_id}"
+    return worktree_root / f"{repo_dir}@{commit[:8]}"
+
+
+def _worktree_add_with_retry(repo_path: Path, worktree_path: Path, commit: str, *, retries: int = 5) -> None:
+    delay = 0.5
+    for attempt in range(retries):
+        try:
+            _run_git_raw(repo_path, ["worktree", "add", "--detach", str(worktree_path), commit], check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr or ""
+            stderr_lower = stderr.lower()
+            if "already registered worktree" in stderr:
+                _remove_worktree(repo_path, worktree_path)
+                _prune_worktrees(repo_path)
+            elif "index.lock" in stderr_lower:
                 pass
+            else:
+                raise
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay + random.uniform(0, 0.5))
+            delay *= 2
+
+
+def ensure_worktree(
+    repo_path: Path,
+    repo_dir: str,
+    base_commit: str,
+    worktree_root: Path,
+    *,
+    worktrees_mode: str,
+) -> tuple[Path, str]:
+    commit = _resolve_commit(repo_path, base_commit)
+    mode = worktrees_mode.strip().lower() if worktrees_mode else "reusable"
+    if mode not in {"ephemeral", "reusable"}:
+        raise ValueError(f"Invalid worktrees_mode: {mode}")
+    worktree_path = _build_worktree_path(worktree_root, repo_dir, commit, mode)
+    with _WORKTREE_LOCK:
+        _prune_worktrees(repo_path)
+        if mode == "reusable":
+            if worktree_path.exists():
+                try:
+                    head = _run_git(worktree_path, ["rev-parse", "HEAD"])
+                    if head == commit:
+                        return worktree_path, commit
+                except subprocess.SubprocessError:
+                    pass
+                _remove_worktree(repo_path, worktree_path)
+            else:
+                _remove_worktree(repo_path, worktree_path)
+        else:
             _remove_worktree(repo_path, worktree_path)
         worktree_root.mkdir(parents=True, exist_ok=True)
-        _run_git(repo_path, ["worktree", "add", "--detach", str(worktree_path), commit])
+        _worktree_add_with_retry(repo_path, worktree_path, commit)
     return worktree_path, commit
 
 
@@ -294,6 +353,8 @@ def _process_instance(
     bench_data: dict[str, Any],
     repo_root: Path,
     worktree_root: Path,
+    worktrees_mode: str,
+    keep_worktrees: bool,
 ) -> None:
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
@@ -311,11 +372,18 @@ def _process_instance(
     exit_status = "Unknown"
     result = ""
     stats: dict[str, Any] | None = None
+    worktree_path: Path | None = None
+    repo_path = Path(instance["repo_path"])
 
     try:
-        repo_path = Path(instance["repo_path"])
         repo_dir = instance["repo_dir"]
-        worktree_path, resolved_commit = ensure_worktree(repo_path, repo_dir, instance["base_commit"], worktree_root)
+        worktree_path, resolved_commit = ensure_worktree(
+            repo_path,
+            repo_dir,
+            instance["base_commit"],
+            worktree_root,
+            worktrees_mode=worktrees_mode,
+        )
         instance = instance | {
             "repo_path": str(worktree_path),
             "base_commit": resolved_commit,
@@ -341,6 +409,8 @@ def _process_instance(
         stats = build_answer_stats(model) if model else None
     finally:
         _cleanup_environment(env)
+        if worktree_path and not keep_worktrees:
+            _remove_worktree(repo_path, worktree_path)
         save_traj(
             agent,
             instance_dir / f"{instance_id}.traj.json",
@@ -380,6 +450,7 @@ def run_tools(
     indexes_root: str | None,
     model_root: str | None,
     keep_worktrees: bool,
+    worktrees_mode: str,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -405,8 +476,6 @@ def run_tools(
         config.setdefault("model", {})["model_name"] = model
     if model_class is not None:
         config.setdefault("model", {})["model_class"] = model_class
-    if pricing is not None:
-        config.setdefault("model", {})["pricing"] = pricing
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
 
@@ -480,12 +549,18 @@ def run_tools(
                     bench_data,
                     repos_root,
                     worktrees_root,
+                    worktrees_mode,
+                    keep_worktrees,
                 ): instance["instance_id"]
                 for instance in instances
             }
             process_futures(futures)
 
     if not keep_worktrees and worktrees_root.exists():
-        shutil.rmtree(worktrees_root, ignore_errors=True)
+        try:
+            if not any(worktrees_root.iterdir()):
+                worktrees_root.rmdir()
+        except OSError:
+            pass
 
     progress_manager.print_report()

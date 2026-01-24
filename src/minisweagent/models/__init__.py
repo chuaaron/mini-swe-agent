@@ -42,6 +42,25 @@ class GlobalModelStats:
 GLOBAL_MODEL_STATS = GlobalModelStats()
 
 
+class GlobalTokenStats:
+    """Global token statistics tracker."""
+
+    def __init__(self):
+        self._total_tokens = 0
+        self._lock = threading.Lock()
+
+    def add(self, total_tokens: int) -> None:
+        with self._lock:
+            self._total_tokens += int(total_tokens)
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens
+
+
+GLOBAL_TOKEN_STATS = GlobalTokenStats()
+
+
 def get_model(input_model_name: str | None = None, config: dict | None = None) -> Model:
     """Get an initialized model object from any kind of user input or settings."""
     resolved_model_name = get_model_name(input_model_name, config)

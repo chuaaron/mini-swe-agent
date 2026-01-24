@@ -16,6 +16,8 @@ run:
   agent_config: ""
   tool_config: ""
   keep_worktrees: false
+  worktrees_mode: ephemeral
+  worktrees_gc_hours: 24
   topk_blocks: 50
   topk_files: 10
   topk_modules: 10

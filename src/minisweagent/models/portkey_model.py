@@ -1,10 +1,8 @@
-import json
 import logging
 import os
 from pathlib import Path
 from typing import Any, Literal
 
-import litellm
 from pydantic import BaseModel
 from tenacity import (
     before_sleep_log,
@@ -14,7 +12,9 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.billing import TokenTracker
+from minisweagent.models import GLOBAL_TOKEN_STATS
+from minisweagent.models.litellm_model import _response_to_dict
 from minisweagent.models.utils.cache_control import set_cache_control
 
 logger = logging.getLogger("portkey_model")
@@ -36,18 +36,14 @@ class PortkeyModelConfig(BaseModel):
     Required by Portkey when not using a virtual key.
     """
     litellm_model_registry: Path | str | None = os.getenv("LITELLM_MODEL_REGISTRY_PATH")
-    """We currently use litellm to calculate costs. Here you can register additional models to litellm's model registry.
-    Note that this might change if we get better support for Portkey and change how we calculate costs.
-    """
+    """Legacy option for model registry overrides (unused in token-only mode)."""
     litellm_model_name_override: str = ""
-    """We currently use litellm to calculate costs. Here you can override the model name to use for litellm in case it
-    doesn't match the Portkey model name.
-    Note that this might change if we get better support for Portkey and change how we calculate costs.
-    """
+    """Legacy option for model name overrides (unused in token-only mode)."""
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
-    """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
+    """Legacy cost tracking mode (ignored in token-only mode)."""
+    billing: dict[str, Any] | None = None
 
 
 class PortkeyModel:
@@ -55,8 +51,14 @@ class PortkeyModel:
         self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
-        if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
-            litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.billing_mode = ""
+        self._token_tracker = TokenTracker(
+            model_name=self.config.model_name,
+            billing=self.config.billing,
+        )
 
         # Get API key from environment or raise error
         self._api_key = os.getenv("PORTKEY_API_KEY")
@@ -98,65 +100,36 @@ class PortkeyModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         if self.config.set_cache_control:
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
-        response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
-        cost = self._calculate_cost(response)
+        payload_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+        response = self._query(payload_messages, **kwargs)
+        response_dict = _response_to_dict(response)
+        content = response.choices[0].message.content or ""
+        call_stats = self._token_tracker.add_call(
+            messages=payload_messages,
+            response=response_dict,
+            completion_text=content,
+        )
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
         return {
-            "content": response.choices[0].message.content or "",
+            "content": content,
             "extra": {
-                "response": response.model_dump(),
-                "cost": cost,
+                "response": response_dict,
             },
         }
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump() | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return self.config.model_dump() | {
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
 
-    def _calculate_cost(self, response) -> float:
-        response_for_cost_calc = response.model_copy()
-        if self.config.litellm_model_name_override:
-            if response_for_cost_calc.model:
-                response_for_cost_calc.model = self.config.litellm_model_name_override
-        prompt_tokens = response_for_cost_calc.usage.prompt_tokens
-        if prompt_tokens is None:
-            logger.warning(
-                f"Prompt tokens are None for model {self.config.model_name}. Setting to 0. Full response: {response_for_cost_calc.model_dump()}"
-            )
-            prompt_tokens = 0
-        total_tokens = response_for_cost_calc.usage.total_tokens
-        completion_tokens = response_for_cost_calc.usage.completion_tokens
-        if completion_tokens is None:
-            logger.warning(
-                f"Completion tokens are None for model {self.config.model_name}. Setting to 0. Full response: {response_for_cost_calc.model_dump()}"
-            )
-            completion_tokens = 0
-        if total_tokens - prompt_tokens - completion_tokens != 0:
-            # This is most likely related to how portkey treats cached tokens: It doesn't count them towards the prompt tokens (?)
-            logger.warning(
-                f"WARNING: Total tokens - prompt tokens - completion tokens != 0: {response_for_cost_calc.model_dump()}."
-                " This is probably a portkey bug or incompatibility with litellm cost tracking. "
-                "Setting prompt tokens based on total tokens and completion tokens. You might want to double check your costs. "
-                f"Full response: {response_for_cost_calc.model_dump()}"
-            )
-            response_for_cost_calc.usage.prompt_tokens = total_tokens - completion_tokens
-        try:
-            cost = litellm.cost_calculator.completion_cost(
-                response_for_cost_calc, model=self.config.litellm_model_name_override or None
-            )
-            assert cost >= 0.0, f"Cost is negative: {cost}"
-        except Exception as e:
-            cost = 0.0
-            if self.config.cost_tracking != "ignore_errors":
-                msg = (
-                    f"Error calculating cost for model {self.config.model_name} based on {response_for_cost_calc.model_dump()}: {e}. "
-                    "You can ignore this issue from your config file with cost_tracking: 'ignore_errors' or "
-                    "globally with export MSWEA_COST_TRACKING='ignore_errors' to ignore this error. "
-                    "Alternatively check the 'Cost tracking' section in the documentation at "
-                    "https://klieret.short.gy/mini-local-models. "
-                    "Still stuck? Please open a github issue at https://github.com/SWE-agent/mini-swe-agent/issues/new/choose!"
-                )
-                logger.critical(msg)
-                raise RuntimeError(msg) from e
-        return cost
+    def get_billing_stats(self) -> dict[str, Any]:
+        return self._token_tracker.summary()

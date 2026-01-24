@@ -15,10 +15,21 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.billing import TokenTracker
+from minisweagent.models import GLOBAL_TOKEN_STATS
 from minisweagent.models.utils.cache_control import set_cache_control
 
 logger = logging.getLogger("litellm_model")
+
+
+def _response_to_dict(response: Any) -> dict[str, Any]:
+    if isinstance(response, dict):
+        return response
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    if hasattr(response, "dict"):
+        return response.dict()
+    return {}
 
 
 class LitellmModelConfig(BaseModel):
@@ -28,7 +39,9 @@ class LitellmModelConfig(BaseModel):
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
-    """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
+    """Legacy cost tracking mode (ignored in token-only mode)."""
+    pricing: dict[str, Any] | None = None
+    billing: dict[str, Any] | None = None
 
 
 class LitellmModel:
@@ -36,6 +49,14 @@ class LitellmModel:
         self.config = config_class(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.billing_mode = ""
+        self._token_tracker = TokenTracker(
+            model_name=self.config.model_name,
+            billing=self.config.billing,
+        )
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
@@ -68,33 +89,36 @@ class LitellmModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         if self.config.set_cache_control:
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
-        response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
-        try:
-            cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)
-            if cost <= 0.0:
-                raise ValueError(f"Cost must be > 0.0, got {cost}")
-        except Exception as e:
-            cost = 0.0
-            if self.config.cost_tracking != "ignore_errors":
-                msg = (
-                    f"Error calculating cost for model {self.config.model_name}: {e}, perhaps it's not registered? "
-                    "You can ignore this issue from your config file with cost_tracking: 'ignore_errors' or "
-                    "globally with export MSWEA_COST_TRACKING='ignore_errors'. "
-                    "Alternatively check the 'Cost tracking' section in the documentation at "
-                    "https://klieret.short.gy/mini-local-models. "
-                    " Still stuck? Please open a github issue at https://github.com/SWE-agent/mini-swe-agent/issues/new/choose!"
-                )
-                logger.critical(msg)
-                raise RuntimeError(msg) from e
+        payload_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+        response = self._query(payload_messages, **kwargs)
+        response_dict = _response_to_dict(response)
+        content = response.choices[0].message.content or ""  # type: ignore[attr-defined]
+        call_stats = self._token_tracker.add_call(
+            messages=payload_messages,
+            response=response_dict,
+            completion_text=content,
+        )
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
         return {
-            "content": response.choices[0].message.content or "",  # type: ignore
+            "content": content,
             "extra": {
-                "response": response.model_dump(),
+                "response": response_dict,
             },
         }
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump() | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return self.config.model_dump() | {
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def get_billing_stats(self) -> dict[str, Any]:
+        return self._token_tracker.summary()

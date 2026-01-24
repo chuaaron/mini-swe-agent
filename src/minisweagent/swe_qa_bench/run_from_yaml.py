@@ -109,8 +109,8 @@ def main() -> None:
     model = _normalize_optional(config.get("model"))
     model_class = _normalize_optional(config.get("model_class"))
     redo_existing = bool(config.get("redo_existing", False))
-    pricing = config.get("pricing")
     billing = config.get("billing")
+    pricing = None
 
     agent_config = config.get("agent_config") or _default_agent_config(mode)
     agent_config_path = Path(agent_config).expanduser().resolve()

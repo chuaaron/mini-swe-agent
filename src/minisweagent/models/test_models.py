@@ -11,6 +11,7 @@ class DeterministicModelConfig(BaseModel):
     outputs: list[str]
     model_name: str = "deterministic"
     cost_per_call: float = 1.0
+    billing: dict[str, Any] | None = None
 
 
 class DeterministicModel:

@@ -13,7 +13,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.billing import TokenTracker
+from minisweagent.models import GLOBAL_TOKEN_STATS
 
 logger = logging.getLogger("requesty_model")
 
@@ -21,6 +22,7 @@ logger = logging.getLogger("requesty_model")
 class RequestyModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
+    billing: dict[str, Any] | None = None
 
 
 class RequestyAPIError(Exception):
@@ -46,8 +48,16 @@ class RequestyModel:
         self.config = RequestyModelConfig(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.billing_mode = ""
         self._api_url = "https://router.requesty.ai/v1/chat/completions"
         self._api_key = os.getenv("REQUESTY_API_KEY", "")
+        self._token_tracker = TokenTracker(
+            model_name=self.config.model_name,
+            billing=self.config.billing,
+        )
 
     @retry(
         reraise=True,
@@ -92,21 +102,17 @@ class RequestyModel:
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
-
-        # Extract cost from usage information
-        usage = response.get("usage", {})
-        cost = usage.get("cost", 0.0)
-
-        # If cost is not available, raise an error
-        if cost == 0.0:
-            raise RequestyAPIError(
-                f"No cost information available from Requesty API for model {self.config.model_name}. "
-                "Cost tracking is required but not provided by the API response."
-            )
-
+        call_stats = self._token_tracker.add_call(
+            messages=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
+            response=response,
+            completion_text=response.get("choices", [{}])[0].get("message", {}).get("content", "") or "",
+        )
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
 
         return {
             "content": response["choices"][0]["message"]["content"] or "",
@@ -116,4 +122,13 @@ class RequestyModel:
         }
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump() | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return self.config.model_dump() | {
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def get_billing_stats(self) -> dict[str, Any]:
+        return self._token_tracker.summary()

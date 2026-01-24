@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +40,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workers", type=int, help="Number of worker threads")
     parser.add_argument("--redo-existing", action=argparse.BooleanOptionalAction, help="Redo existing outputs")
     parser.add_argument("--keep-worktrees", action=argparse.BooleanOptionalAction, help="Keep worktrees after run")
+    parser.add_argument("--worktrees-mode", choices=["ephemeral", "reusable"], help="Worktree mode")
+    parser.add_argument("--worktrees-gc-hours", type=int, help="GC worktrees older than N hours (0 to disable)")
 
     parser.add_argument("--model", dest="model_name", help="Override model.model_name")
     parser.add_argument("--model-class", help="Override model.model_class")
@@ -87,6 +91,10 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["run"]["redo_existing"] = args.redo_existing
     if args.keep_worktrees is not None:
         overrides["run"]["keep_worktrees"] = args.keep_worktrees
+    if args.worktrees_mode:
+        overrides["run"]["worktrees_mode"] = args.worktrees_mode
+    if args.worktrees_gc_hours is not None:
+        overrides["run"]["worktrees_gc_hours"] = args.worktrees_gc_hours
     if args.output_dir:
         overrides["run"]["output_dir"] = args.output_dir
     if args.image:
@@ -181,6 +189,25 @@ def _resolve_output_root(value: Any, *, root: Path) -> Path:
     return path
 
 
+def _gc_worktrees(worktrees_root: Path, max_age_hours: int) -> None:
+    if max_age_hours <= 0:
+        return
+    if not worktrees_root.exists():
+        return
+    cutoff = time.time() - (max_age_hours * 3600)
+    for mode_dir in worktrees_root.iterdir():
+        if not mode_dir.is_dir():
+            continue
+        for entry in mode_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
+            except OSError:
+                continue
+
+
 def _normalize_graph_index_dir(value: Any) -> str:
     if not value or not str(value).strip():
         return ""
@@ -209,6 +236,8 @@ def _log_summary(
         "model_root": paths.get("model_root"),
         "worktrees_root": paths.get("worktrees_root"),
         "output_root": paths.get("output_root"),
+        "worktrees_mode": run_cfg.get("worktrees_mode"),
+        "worktrees_gc_hours": run_cfg.get("worktrees_gc_hours"),
         "output_model_name": paths.get("output_model_name"),
         "model_name": model_cfg.get("model_name"),
         "model_class": model_cfg.get("model_class"),
@@ -272,6 +301,10 @@ def main(argv: list[str] | None = None) -> None:
     workers = int(run_cfg.get("workers", 1))
     redo_existing = bool(run_cfg.get("redo_existing", False))
     keep_worktrees = bool(run_cfg.get("keep_worktrees", False))
+    worktrees_mode = str(run_cfg.get("worktrees_mode", "ephemeral")).strip().lower() or "ephemeral"
+    if worktrees_mode not in {"ephemeral", "reusable"}:
+        raise ValueError(f"Invalid worktrees_mode: {worktrees_mode}")
+    worktrees_gc_hours = int(run_cfg.get("worktrees_gc_hours") or 0)
     output_dir = str(run_cfg.get("output_dir") or "")
     method = _default_method(mode, run_cfg.get("method"))
     image = _normalize_optional(run_cfg.get("image"))
@@ -279,11 +312,8 @@ def main(argv: list[str] | None = None) -> None:
 
     model_name = _normalize_optional(model_cfg.get("model_name"))
     model_class = _normalize_optional(model_cfg.get("model_class"))
-    pricing = config.get("pricing")
     billing = config.get("billing")
-    if model_class != "chatanywhere":
-        pricing = None
-        billing = None
+    pricing = None
 
     root = project_root()
     default_agent = root / "locbench" / "config" / ("agent_tools.yaml" if mode == "tools" else "agent_bash.yaml")
@@ -305,6 +335,8 @@ def main(argv: list[str] | None = None) -> None:
     run_cfg["graph_index_dir"] = _normalize_graph_index_dir(run_cfg.get("graph_index_dir", ""))
 
     _log_summary(config, mode=mode, agent_config=agent_config, tool_config=tool_config)
+
+    _gc_worktrees(worktrees_root, worktrees_gc_hours)
 
     if mode == "bash":
         runner = runners.BashRunner(
@@ -358,6 +390,7 @@ def main(argv: list[str] | None = None) -> None:
             indexes_root=indexes_root,
             model_root=model_root,
             keep_worktrees=keep_worktrees,
+            worktrees_mode=worktrees_mode,
             pricing=pricing,
             billing=billing,
         )
@@ -390,6 +423,7 @@ def main(argv: list[str] | None = None) -> None:
         force_rebuild=bool(run_cfg.get("force_rebuild", False)),
         redo_existing=redo_existing,
         keep_worktrees=keep_worktrees,
+        worktrees_mode=worktrees_mode,
     )
     runner.run()
 

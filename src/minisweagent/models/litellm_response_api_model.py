@@ -10,8 +10,12 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.models import GLOBAL_MODEL_STATS
-from minisweagent.models.litellm_model import LitellmModel, LitellmModelConfig
+from minisweagent.models import GLOBAL_TOKEN_STATS
+from minisweagent.models.litellm_model import (
+    LitellmModel,
+    LitellmModelConfig,
+    _response_to_dict,
+)
 from minisweagent.models.utils.openai_utils import coerce_responses_text
 
 logger = logging.getLogger("litellm_response_api_model")
@@ -60,20 +64,24 @@ class LitellmResponseAPIModel(LitellmModel):
             raise e
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        previous_response_id = self._previous_response_id
         response = self._query(messages, **kwargs)
         text = coerce_responses_text(response)
-        try:
-            cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)
-        except Exception as e:
-            logger.critical(
-                f"Error calculating cost for model {self.config.model_name}: {e}. "
-                "Please check the 'Updating the model registry' section in the documentation. "
-                "http://bit.ly/4p31bi4 Still stuck? Please open a github issue for help!"
-            )
-            raise
+        response_dict = _response_to_dict(response)
+        payload_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+        if previous_response_id is not None:
+            payload_messages = payload_messages[-1:]
+        call_stats = self._token_tracker.add_call(
+            messages=payload_messages,
+            response=response_dict,
+            completion_text=text,
+        )
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
         return {
             "content": text,
         }

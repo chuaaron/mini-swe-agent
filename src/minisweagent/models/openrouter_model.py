@@ -13,7 +13,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.billing import TokenTracker
+from minisweagent.models import GLOBAL_TOKEN_STATS
 from minisweagent.models.utils.cache_control import set_cache_control
 
 logger = logging.getLogger("openrouter_model")
@@ -25,7 +26,8 @@ class OpenRouterModelConfig(BaseModel):
     set_cache_control: Literal["default_end"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
-    """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
+    """Legacy cost tracking mode (ignored in token-only mode)."""
+    billing: dict[str, Any] | None = None
 
 
 class OpenRouterAPIError(Exception):
@@ -51,8 +53,16 @@ class OpenRouterModel:
         self.config = OpenRouterModelConfig(**kwargs)
         self.cost = 0.0
         self.n_calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.billing_mode = ""
         self._api_url = "https://openrouter.ai/api/v1/chat/completions"
         self._api_key = os.getenv("OPENROUTER_API_KEY", "")
+        self._token_tracker = TokenTracker(
+            model_name=self.config.model_name,
+            billing=self.config.billing,
+        )
 
     @retry(
         reraise=True,
@@ -98,21 +108,17 @@ class OpenRouterModel:
         if self.config.set_cache_control:
             messages = set_cache_control(messages, mode=self.config.set_cache_control)
         response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
-
-        usage = response.get("usage", {})
-        cost = usage.get("cost", 0.0)
-        if cost <= 0.0 and self.config.cost_tracking != "ignore_errors":
-            raise RuntimeError(
-                f"No valid cost information available from OpenRouter API for model {self.config.model_name}: "
-                f"Usage {usage}, cost {cost}. Cost must be > 0.0. Set cost_tracking: 'ignore_errors' in your config file or "
-                "export MSWEA_COST_TRACKING='ignore_errors' to ignore cost tracking errors "
-                "(for example for free/local models), more information at https://klieret.short.gy/mini-local-models "
-                "for more details. Still stuck? Please open a github issue at https://github.com/SWE-agent/mini-swe-agent/issues/new/choose!"
-            )
-
+        call_stats = self._token_tracker.add_call(
+            messages=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
+            response=response,
+            completion_text=response.get("choices", [{}])[0].get("message", {}).get("content", "") or "",
+        )
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
 
         return {
             "content": response["choices"][0]["message"]["content"] or "",
@@ -122,4 +128,13 @@ class OpenRouterModel:
         }
 
     def get_template_vars(self) -> dict[str, Any]:
-        return self.config.model_dump() | {"n_model_calls": self.n_calls, "model_cost": self.cost}
+        return self.config.model_dump() | {
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+    def get_billing_stats(self) -> dict[str, Any]:
+        return self._token_tracker.summary()

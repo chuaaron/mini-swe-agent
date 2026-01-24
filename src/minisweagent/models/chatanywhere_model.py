@@ -13,8 +13,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from minisweagent.billing import BillingTracker
-from minisweagent.models import GLOBAL_MODEL_STATS
+from minisweagent.billing import TokenTracker
+from minisweagent.models import GLOBAL_TOKEN_STATS
 
 logger = logging.getLogger("chatanywhere_model")
 
@@ -46,9 +46,8 @@ class ChatAnywhereModel:
         self.n_calls = 0
         self._api_url = self._resolve_api_url()
         self._api_key = os.getenv("OPENAI_API_KEY", "")
-        self._billing = BillingTracker(
+        self._token_tracker = TokenTracker(
             model_name=self.config.model_name,
-            pricing=self.config.pricing,
             billing=self.config.billing,
         )
         self.prompt_tokens = 0
@@ -104,19 +103,17 @@ class ChatAnywhereModel:
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         response = self._query([{"role": msg["role"], "content": msg["content"]} for msg in messages], **kwargs)
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        call_stats = self._billing.add_call(
+        call_stats = self._token_tracker.add_call(
             messages=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
             response=response,
             completion_text=content,
         )
-        cost = call_stats["cost_usd"]
         self.n_calls += 1
-        self.cost += cost
-        GLOBAL_MODEL_STATS.add(cost)
-        self.prompt_tokens = self._billing.prompt_tokens
-        self.completion_tokens = self._billing.completion_tokens
-        self.total_tokens = self._billing.total_tokens
-        self.billing_mode = self._billing.summary().get("billing_mode", "")
+        self.prompt_tokens = self._token_tracker.prompt_tokens
+        self.completion_tokens = self._token_tracker.completion_tokens
+        self.total_tokens = self._token_tracker.total_tokens
+        self.billing_mode = self._token_tracker.summary().get("billing_mode", "")
+        GLOBAL_TOKEN_STATS.add(call_stats.get("total_tokens", 0))
 
         return {
             "content": content,
@@ -133,4 +130,4 @@ class ChatAnywhereModel:
         }
 
     def get_billing_stats(self) -> dict[str, Any]:
-        return self._billing.summary()
+        return self._token_tracker.summary()

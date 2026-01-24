@@ -56,7 +56,7 @@ class RunBatchProgressManager:
         self._instances_by_exit_status = collections.defaultdict(list)
         self._main_progress_bar = Progress(
             SpinnerColumn(spinner_name="dots2"),
-            TextColumn("[progress.description]{task.description} (${task.fields[total_cost]})"),
+            TextColumn("[progress.description]{task.description} ({task.fields[total_tokens]} toks)"),
             BarColumn(),
             MofNCompleteColumn(),
             TaskProgressColumn(),
@@ -76,7 +76,7 @@ class RunBatchProgressManager:
         """
 
         self._main_task_id = self._main_progress_bar.add_task(
-            "[cyan]Overall Progress", total=num_instances, total_cost="0.00", eta=""
+            "[cyan]Overall Progress", total=num_instances, total_tokens="0", eta=""
         )
 
         self.render_group = Group(self._main_progress_bar, Table(), self._task_progress_bar)
@@ -114,11 +114,11 @@ class RunBatchProgressManager:
         assert self.render_group is not None
         self.render_group.renderables[1] = t
 
-    def _update_total_costs(self) -> None:
+    def _update_total_tokens(self) -> None:
         with self._lock:
             self._main_progress_bar.update(
                 self._main_task_id,
-                total_cost=f"{minisweagent.models.GLOBAL_MODEL_STATS.cost:.2f}",
+                total_tokens=str(minisweagent.models.GLOBAL_TOKEN_STATS.total_tokens),
                 eta=self._get_eta_text(),
             )
 
@@ -131,7 +131,7 @@ class RunBatchProgressManager:
                 status=_shorten_str(message, 30),
                 instance_id=_shorten_str(instance_id, 25, shorten_left=True),
             )
-        self._update_total_costs()
+        self._update_total_tokens()
 
     def on_instance_start(self, instance_id: str):
         with self._lock:
@@ -151,7 +151,7 @@ class RunBatchProgressManager:
                 pass
             self._main_progress_bar.update(TaskID(0), advance=1, eta=self._get_eta_text())
         self.update_exit_status_table()
-        self._update_total_costs()
+        self._update_total_tokens()
         if self._yaml_report_path is not None:
             self._save_overview_data_yaml(self._yaml_report_path)
 
@@ -166,7 +166,7 @@ class RunBatchProgressManager:
                 print(f"  {instance}")
 
     def _get_overview_data(self) -> dict:
-        """Get data like exit statuses, total costs, etc."""
+        """Get data like exit statuses, total tokens, etc."""
         return {
             # convert defaultdict to dict because of serialization
             "instances_by_exit_status": dict(self._instances_by_exit_status),
