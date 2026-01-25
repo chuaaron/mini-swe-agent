@@ -52,7 +52,7 @@
 ## 3. 设计流程（Bash-only）
 
 每个实例执行流程：
-1. 将 `locbench_repos/` 只读挂载到容器 `/repos`
+1. 默认仅挂载当前仓库到容器 `/repos/<repo_dir>`（`repo_mount_mode: single`）
 2. 容器内创建 `/work/<instance_id>`
 3. `git clone --no-hardlinks /repos/<org_repo> /work/<instance_id>`
 4. `git checkout <base_commit>`
@@ -60,7 +60,7 @@
 6. 输出 JSON（found_files/found_entities/found_modules）
 
 关键点：
-- **只读镜像**：不污染本地仓库
+- **只读镜像**：不污染本地仓库（需要全量挂载可改为 `repo_mount_mode: all`）
 - **单实例隔离**：每个实例独立容器与工作目录
 - **单步协议**：避免多命令导致 FormatError
 

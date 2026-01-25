@@ -94,7 +94,7 @@ mini-swe-agent/swe_qa_bench/results/
 **已确认决策（来自需求方）**
 - 同时实现 bash-only 与 tools 两种方法
 - METHOD 命名固定为 `miniswe_bash` / `miniswe_tools`
-- 强制使用 Docker（repos 只读挂载，安全与一致性优先）
+- 强制使用 Docker（默认单仓库只读挂载，安全与一致性优先）
 - code_search 使用独立配置文件（不复用 LocBench）
 - 输出严格按 repo 分文件（官方默认）
 - tools 方法需要写入 `relative_code_list`（可解释性与检索分析）
@@ -265,7 +265,7 @@ MINI_SWE_AGENT_FINAL_OUTPUT
 
 - SWE-QA-Bench 仓库路径：`datasets/repos/{repo}`
 - 数据集没有 base_commit，默认使用 `HEAD`
-- Docker 容器中只读挂载 `datasets/repos` 至 `/repos`（强制）
+- Docker 容器默认只读挂载单仓库至 `/repos/<repo>`（可切回全量挂载）
 - tools 模式在宿主机对 `datasets/repos/{repo}` 建索引
 
 ---

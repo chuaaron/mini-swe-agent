@@ -834,14 +834,14 @@ action_regex = r"```bash\s*\n(.*?)\n```"
 
 ## 10. 环境一致性策略
 
-**利用现有 Docker 挂载**
+**利用 Docker 挂载（默认单仓库）**
 
-LocBench 容器已有挂载配置（`locbench.py:267`）：
+LocBench 默认按实例挂载单仓库（`repo_mount_mode: single`），示例：
 ```python
-mount_arg = f"{repo_root}:/repos:ro"
+mount_arg = f"{repo_source_path}:/repos/{repo_dir}:ro"
 ```
 
-宿主机 `repo_root` 与容器内 `/repos` 指向同一镜像仓库，但不保证 checkout 到同一 commit。
+宿主机 `repo_source_path` 与容器内 `/repos/<repo_dir>` 指向同一镜像仓库，但不保证 checkout 到同一 commit。
 
 **容器启动流程**（`locbench.yaml:139-145`）：
 ```bash

@@ -49,6 +49,13 @@ cp $MINISWE_ROOT/swe_qa_bench/config/local.yaml.example \\
 - `--repos` 后面的参数不要被换行拆开（否则 shell 会把 repo 名当作命令）。
 - 迁移到新机器时，通常只需改 `local.yaml` 里的 `dataset_root` 和 `OPENAI_API_KEY`。
 
+默认仓库隔离为单仓库挂载（`repo_mount_mode: single`）。如需回退到全量挂载，
+请在 `swe_qa_bench/config/agent_bash.yaml` / `agent_tools.yaml` 中设置：
+```
+environment:
+  repo_mount_mode: all
+```
+
 ### 2.1 Bash-only（基线）
 
 ```bash

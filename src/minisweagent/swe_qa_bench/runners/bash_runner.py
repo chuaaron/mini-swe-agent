@@ -21,6 +21,7 @@ from minisweagent import package_dir
 from minisweagent.agents.default import DefaultAgent
 from minisweagent.config import get_config_path
 from minisweagent.environments import get_environment
+from minisweagent.environments.repo_mounts import build_repo_mount_args
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
@@ -211,6 +212,7 @@ def _get_answer_path(output_root: Path, output_model_name: str, method: str, rep
 def _get_environment(config: dict[str, Any], instance: dict[str, Any], repos_root: Path):
     env_config = copy.deepcopy(config.get("environment", {}))
     env_config["environment_class"] = env_config.get("environment_class", "docker")
+    repo_mount_mode = env_config.pop("repo_mount_mode", "single")
     if env_config["environment_class"] != "docker":
         raise ValueError("SWE-QA-Bench runner supports docker only.")
 
@@ -219,14 +221,13 @@ def _get_environment(config: dict[str, Any], instance: dict[str, Any], repos_roo
         raise ValueError("Docker image must be set for SWE-QA-Bench.")
     env_config["image"] = image
 
-    run_args = list(env_config.get("run_args", ["--rm"]))
-    if "--rm" not in run_args:
-        run_args.insert(0, "--rm")
-
-    mount_arg = f"{repos_root}:/repos:ro"
-    if mount_arg not in run_args:
-        run_args.extend(["-v", mount_arg])
-    env_config["run_args"] = run_args
+    env_config["run_args"] = build_repo_mount_args(
+        run_args=env_config.get("run_args", ["--rm"]),
+        repo_mount_mode=repo_mount_mode,
+        repo_root=repos_root,
+        repo_source_path=Path(instance["repo_path"]),
+        repo_mount_path=instance["repo_mount_path"],
+    )
 
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):

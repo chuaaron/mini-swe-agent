@@ -17,7 +17,7 @@
 
 **输入**
 - `datasets/questions/{repo}.jsonl`
-- `datasets/repos/{repo}/`（只读挂载到容器 `/repos`）
+- `datasets/repos/{repo}/`（默认只读挂载到容器 `/repos/<repo>`）
 
 **输出**
 - `swe_qa_bench/results/answers/{MODEL}/{METHOD}/{repo}.jsonl`
@@ -40,7 +40,7 @@
 - Prompt：`swe_qa_bench/config/agent_bash.yaml`
 
 **执行流程**
-1. Docker 容器只读挂载 `datasets/repos` 到 `/repos`
+1. Docker 容器默认只读挂载单仓库到 `/repos/<repo>`
 2. 模型在容器内执行 bash（rg/cat/sed 等）
 3. 输出 `MINI_SWE_AGENT_FINAL_OUTPUT` JSON
 4. 写入 answers JSONL

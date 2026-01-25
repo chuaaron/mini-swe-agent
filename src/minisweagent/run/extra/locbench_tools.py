@@ -27,6 +27,7 @@ from minisweagent import package_dir
 from minisweagent.agents.tool_agent import ToolAgent
 from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.environments import get_environment
+from minisweagent.environments.repo_mounts import build_repo_mount_args
 from minisweagent.models import get_model, get_model_name
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.utils.save import save_traj
@@ -299,6 +300,7 @@ def build_loc_output(result: str, instance_id: str, record: dict[str, Any] | Non
 def get_locbench_environment(config: dict[str, Any], instance: dict[str, Any], repo_root: Path) -> Any:
     env_config = copy.deepcopy(config.get("environment", {}))
     env_config["environment_class"] = env_config.get("environment_class", "docker")
+    repo_mount_mode = env_config.pop("repo_mount_mode", "single")
     if env_config["environment_class"] != "docker":
         raise ValueError("LocBench runner currently supports the docker environment only.")
 
@@ -307,14 +309,14 @@ def get_locbench_environment(config: dict[str, Any], instance: dict[str, Any], r
         raise ValueError("Docker image must be set for locbench.")
     env_config["image"] = image
 
-    run_args = list(env_config.get("run_args", ["--rm"]))
-    if "--rm" not in run_args:
-        run_args.insert(0, "--rm")
-
-    mount_arg = f"{repo_root}:/repos:ro"
-    if mount_arg not in run_args:
-        run_args.extend(["-v", mount_arg])
-    env_config["run_args"] = run_args
+    repo_source_path = Path(instance.get("repo_source_path") or instance["repo_path"])
+    env_config["run_args"] = build_repo_mount_args(
+        run_args=env_config.get("run_args", ["--rm"]),
+        repo_mount_mode=repo_mount_mode,
+        repo_root=repo_root,
+        repo_source_path=repo_source_path,
+        repo_mount_path=instance["repo_mount_path"],
+    )
 
     env = get_environment(env_config)
     if startup_command := config.get("run", {}).get("env_startup_command"):
@@ -437,6 +439,7 @@ def build_instances(
             "repo_slug": repo_slug,
             "repo_dir": repo_dir,
             "repo_path": str(repo_path),
+            "repo_source_path": str(repo_path),
             "repo_mount_path": repo_mount_path,
             "repo_mount_path_q": shlex.quote(repo_mount_path),
             "workdir": workdir,

@@ -62,6 +62,13 @@ cp locbench/config/local.yaml.example locbench/config/local.yaml
 - `paths.repos_root`
 - `env.OPENAI_API_KEY`
 
+默认仓库隔离为单仓库挂载（`repo_mount_mode: single`），如需回退到全量挂载，
+在对应的 agent 配置中设置：
+```
+environment:
+  repo_mount_mode: all
+```
+
 ---
 
 ## 5. Docker 镜像（bash-only / tools）

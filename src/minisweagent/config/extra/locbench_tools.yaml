@@ -172,6 +172,7 @@ agent:
 
 environment:
   environment_class: docker
+  repo_mount_mode: single
   image: locbench-minisweagent:latest
   cwd: "/"
   timeout: 60

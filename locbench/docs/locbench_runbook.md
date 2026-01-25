@@ -18,6 +18,13 @@ cp locbench/config/local.yaml.example locbench/config/local.yaml
 - 必填：`env.OPENAI_API_KEY`
 - Tools/IR 可选：`paths.indexes_root`、`paths.model_root`
 
+默认仓库隔离为单仓库挂载（`repo_mount_mode: single`）。如需回退到全量挂载，
+请在 `locbench/config/agent_bash.yaml` / `locbench/config/agent_tools.yaml` 中设置：
+```
+environment:
+  repo_mount_mode: all
+```
+
 ---
 
 ## 1. 构建 Docker 镜像（bash/tools 必需）

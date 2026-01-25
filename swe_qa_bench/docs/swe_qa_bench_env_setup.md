@@ -77,6 +77,13 @@ cp $MINISWE_ROOT/swe_qa_bench/config/local.yaml.example \\
 - `OPENAI_API_BASE` 需为完整的 `/v1/chat/completions` URL。
 - `output_model_name` 用于输出目录名，避免包含 `/`。
 
+默认仓库隔离为单仓库挂载（`repo_mount_mode: single`）。如需回退到全量挂载，
+请在 `swe_qa_bench/config/agent_bash.yaml` / `agent_tools.yaml` 中设置：
+```
+environment:
+  repo_mount_mode: all
+```
+
 ---
 
 ## 5. Docker 镜像（bash-only / tools）
@@ -112,6 +119,6 @@ export HF_HOME=$MINISWE_ROOT/swe_qa_bench/models
 ## 7. 运行前检查
 
 - `datasets/questions/` 与 `datasets/reference/` 存在
-- `datasets/repos/<repo>` 可读（只读挂载）
+- `datasets/repos/<repo>` 可读（默认单仓库只读挂载）
 - `default.yaml` 与 `local.yaml` 已配置路径与 API
 - tools 模式已完成索引构建（见索引文档）

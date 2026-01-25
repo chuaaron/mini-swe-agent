@@ -35,7 +35,7 @@
 - Prompt：`locbench/config/agent_bash.yaml`
 
 **执行流程**
-1. 容器启动后挂载 `/repos`（只读）
+1. 默认仅挂载当前仓库到 `/repos/<repo_dir>`（只读，`repo_mount_mode: single`）
 2. 复制仓库到 `/work/<instance_id>`
 3. `git checkout <base_commit>`
 4. 仅通过 bash（rg/cat/sed）探索
