@@ -33,13 +33,13 @@ _EXT_LANGUAGE = {
 @dataclass
 class CodeSearchArgs:
     query: str
-    topk: int = 20
+    topk: int = 15
     filters: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "CodeSearchArgs":
         query = raw.get("query")
-        topk = raw.get("topk", 20)
+        topk = raw.get("topk", 15)
         filters = raw.get("filters")
         if isinstance(topk, str):
             try:

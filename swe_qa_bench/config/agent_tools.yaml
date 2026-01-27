@@ -78,6 +78,19 @@ agent:
     Example:
     printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"answer":"..."}\n'
     </instructions>
+  final_prompt_template: |
+    You have reached the maximum step limit. You must provide your final answer now.
+    Do NOT run any more commands or tools.
+
+    Output ONLY the final JSON payload with this key:
+    - answer: string
+
+    Submit by running exactly ONE command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"answer":"..."}\n'
   action_observation_template: |
     {% if output.type == "tool" -%}
     <tool_result>
@@ -177,3 +190,9 @@ environment:
     MANPAGER: cat
     LESS: -R
     PIP_PROGRESS_BAR: 'off'
+
+run:
+  env_teardown_command: |
+    cd {{ workdir_q }} &&
+    git reset --hard &&
+    git clean -fd

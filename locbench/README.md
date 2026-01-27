@@ -36,7 +36,7 @@ docker build -t locbench-minisweagent:latest -f locbench/Dockerfile .
 
 ```bash
 # bash-only
-PYTHONPATH=src python -m minisweagent.run_locbench --mode bash --slice 0:1 --workers 1 --redo-existing
+PYTHONPATH=src python -m minisweagent.run_locbench --mode bash --slice 0:10 --workers 1 --redo-existing
 
 # tools（需要已有索引+模型）
 PYTHONPATH=src python -m minisweagent.run_locbench --mode tools --slice 0:1 --workers 1 --redo-existing

@@ -53,6 +53,7 @@ class LitellmModel:
         self.completion_tokens = 0
         self.total_tokens = 0
         self.billing_mode = ""
+        self._last_attempt_prompt_tokens: int | None = None
         self._token_tracker = TokenTracker(
             model_name=self.config.model_name,
             billing=self.config.billing,
@@ -62,7 +63,7 @@ class LitellmModel:
 
     @retry(
         reraise=True,
-        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
+        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "3"))),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         retry=retry_if_not_exception_type(
@@ -78,6 +79,7 @@ class LitellmModel:
         ),
     )
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        self._last_attempt_prompt_tokens = self._token_tracker.add_attempt(messages=messages)
         try:
             return litellm.completion(
                 model=self.config.model_name, messages=messages, **(self.config.model_kwargs | kwargs)
@@ -97,6 +99,7 @@ class LitellmModel:
             messages=payload_messages,
             response=response_dict,
             completion_text=content,
+            attempt_prompt_tokens=self._last_attempt_prompt_tokens,
         )
         self.prompt_tokens = self._token_tracker.prompt_tokens
         self.completion_tokens = self._token_tracker.completion_tokens

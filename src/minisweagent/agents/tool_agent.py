@@ -21,6 +21,7 @@ class ToolAgentConfig(BaseModel):
     action_observation_template: str
     tool_format_error_template: str
     tool_error_template: str
+    final_prompt_template: str = ""
     action_regex: str = r"```bash\s*\n(.*?)\n```"
     step_limit: int = 0
     cost_limit: float = 3.0
@@ -74,6 +75,7 @@ class ToolAgent:
         self.env = env
         self.tool_registry = tool_registry
         self.extra_template_vars = {}
+        self._final_prompt_injected = False
 
     def render_template(self, template: str, **kwargs) -> str:
         template_vars = self.config.model_dump() | self.env.get_template_vars() | self.model.get_template_vars()
@@ -103,6 +105,14 @@ class ToolAgent:
         return self.get_observation(self.query())
 
     def query(self) -> dict:
+        if (
+            self.config.step_limit > 0
+            and self.model.n_calls == self.config.step_limit - 1
+            and self.config.final_prompt_template
+            and not self._final_prompt_injected
+        ):
+            self.add_message("user", self.render_template(self.config.final_prompt_template))
+            self._final_prompt_injected = True
         if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
             raise LimitsExceeded()
         response = self.model.query(self.messages)

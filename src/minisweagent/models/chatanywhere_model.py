@@ -46,6 +46,7 @@ class ChatAnywhereModel:
         self.n_calls = 0
         self._api_url = self._resolve_api_url()
         self._api_key = os.getenv("OPENAI_API_KEY", "")
+        self._last_attempt_prompt_tokens: int | None = None
         self._token_tracker = TokenTracker(
             model_name=self.config.model_name,
             billing=self.config.billing,
@@ -68,12 +69,13 @@ class ChatAnywhereModel:
 
     @retry(
         reraise=True,
-        stop=stop_after_attempt(10),
+        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "3"))),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         retry=retry_if_not_exception_type((ChatAnywhereAuthenticationError, KeyboardInterrupt)),
     )
     def _query(self, messages: list[dict[str, str]], **kwargs):
+        self._last_attempt_prompt_tokens = self._token_tracker.add_attempt(messages=messages)
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -107,6 +109,7 @@ class ChatAnywhereModel:
             messages=[{"role": msg["role"], "content": msg["content"]} for msg in messages],
             response=response,
             completion_text=content,
+            attempt_prompt_tokens=self._last_attempt_prompt_tokens,
         )
         self.n_calls += 1
         self.prompt_tokens = self._token_tracker.prompt_tokens

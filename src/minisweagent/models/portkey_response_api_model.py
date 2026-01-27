@@ -29,13 +29,14 @@ class PortkeyResponseAPIModel(PortkeyModel):
 
     @retry(
         reraise=True,
-        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "10"))),
+        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "3"))),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         retry=retry_if_not_exception_type((KeyboardInterrupt, TypeError, ValueError)),
     )
     def _query(self, messages: list[dict[str, str]], **kwargs):
         input_messages = messages if self._previous_response_id is None else messages[-1:]
+        self._last_attempt_prompt_tokens = self._token_tracker.add_attempt(messages=input_messages)
         resp = self.client.responses.create(
             model=self.config.model_name,
             input=input_messages,
@@ -57,6 +58,7 @@ class PortkeyResponseAPIModel(PortkeyModel):
             messages=payload_messages,
             response=response_dict,
             completion_text=text,
+            attempt_prompt_tokens=self._last_attempt_prompt_tokens,
         )
         self.n_calls += 1
         self.prompt_tokens = self._token_tracker.prompt_tokens

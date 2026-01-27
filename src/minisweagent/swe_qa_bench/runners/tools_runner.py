@@ -7,6 +7,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import random
+import shlex
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from minisweagent.environments import get_environment
 from minisweagent.environments.repo_mounts import build_repo_mount_args
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
+from minisweagent.run.extra.utils.run_summary import write_run_summary
 from minisweagent.run.utils.save import save_traj
 from minisweagent.swe_qa_bench.utils import (
     FileReadTracker,
@@ -38,6 +40,15 @@ from minisweagent.tools.code_search import CodeSearchTool
 from minisweagent.utils.log import add_file_handler, logger
 
 _OUTPUT_FILE_LOCK = threading.Lock()
+
+
+def _get_last_assistant_content(agent: ToolAgent | None) -> str:
+    if agent is None:
+        return ""
+    for message in reversed(agent.messages):
+        if message.get("role") == "assistant":
+            return message.get("content", "") or ""
+    return ""
 
 
 class ProgressTrackingToolAgent(ToolAgent):
@@ -185,6 +196,7 @@ def _build_instances(
                 "repo_path": str(repo_path.resolve()),
                 "repo_mount_path": f"/repos/{repo}",
                 "workdir": f"/repos/{repo}",
+                "workdir_q": shlex.quote(f"/repos/{repo}"),
                 "question": question,
                 "question_index": idx,
                 "base_commit": "HEAD",
@@ -260,6 +272,21 @@ def _cleanup_environment(env: Any) -> None:
         env.cleanup()
 
 
+def _run_teardown_command(env: Any, config: dict[str, Any], instance: dict[str, Any]) -> None:
+    if env is None:
+        return
+    teardown_command = config.get("run", {}).get("env_teardown_command")
+    if not teardown_command:
+        return
+    try:
+        rendered = Template(teardown_command, undefined=StrictUndefined).render(**instance)
+        out = env.execute(rendered)
+        if out.get("returncode", 0) != 0:
+            logger.warning("Teardown command failed for %s: %s", instance.get("instance_id"), out)
+    except Exception as exc:
+        logger.warning("Teardown command error for %s: %s", instance.get("instance_id"), exc)
+
+
 def _parse_answer(result: str) -> str:
     payload, _ = extract_json_payload(result)
     if payload and isinstance(payload.get("answer"), str):
@@ -283,6 +310,8 @@ def process_instance(
     output_model_name: str,
     method: str,
     repos_root: Path,
+    summary_sink: list[dict[str, Any]],
+    summary_lock: threading.Lock,
 ) -> None:
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
@@ -334,16 +363,22 @@ def process_instance(
             workdir=instance["workdir"],
             repo_mount_path=instance["repo_mount_path"],
         )
+        if exit_status == "LimitsExceeded":
+            fallback_text = _get_last_assistant_content(agent)
+            if fallback_text:
+                result = fallback_text
     except Exception as exc:
         exit_status = f"{type(exc).__name__}"
         result = str(exc)
         logger.error(f"Error processing {instance_id}: {exc}", exc_info=True)
     finally:
+        _run_teardown_command(env, config, instance)
         _cleanup_environment(env)
 
-    answer = _parse_answer(result) if exit_status == "Submitted" else ""
+    answer = _parse_answer(result) if exit_status in {"Submitted", "LimitsExceeded"} else ""
     relative_code_list = merge_relative_code_list(tool_registry.tool_candidates, tracker.paths)
     stats = build_answer_stats(model)
+    billing_stats = model.get_billing_stats() if model and hasattr(model, "get_billing_stats") else {}
 
     record = {
         "question": question,
@@ -351,6 +386,10 @@ def process_instance(
         "final_answer": answer,
         "relative_code_list": relative_code_list,
         "stats": stats,
+        "exit_status": exit_status,
+        "steps": getattr(model, "n_calls", 0) if model else 0,
+        "trace_tokens": billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0)),
+        "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
     }
     _append_answer_record(answer_path, record)
     logger.info("Answer appended to: %s", answer_path)
@@ -369,6 +408,17 @@ def process_instance(
         result=result,
         extra_info=extra_info,
     )
+    summary_record = {
+        "instance_id": instance_id,
+        "exit_status": exit_status,
+        "steps": getattr(model, "n_calls", 0) if model else 0,
+        "trace_tokens": billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0)),
+        "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
+        "cost_usd": billing_stats.get("cost_usd", getattr(model, "cost", 0.0)),
+        "correct": None,
+    }
+    with summary_lock:
+        summary_sink.append(summary_record)
 
     progress_manager.on_instance_end(instance_id, exit_status)
 
@@ -466,6 +516,8 @@ def run_tools(
     logger.info(f"Running on {len(instances)} instances...")
 
     progress_manager = RunBatchProgressManager(len(instances), output_dir_path / f"exit_statuses_{time.time()}.yaml")
+    instance_summaries: list[dict[str, Any]] = []
+    summary_lock = threading.Lock()
 
     def process_futures(futures: dict[concurrent.futures.Future, str]):
         for future in concurrent.futures.as_completed(futures):
@@ -493,9 +545,23 @@ def run_tools(
                     output_model_name,
                     method,
                     repos_root,
+                    instance_summaries,
+                    summary_lock,
                 ): instance["instance_id"]
                 for instance in instances
             }
             process_futures(futures)
 
     progress_manager.print_report()
+    write_run_summary(
+        output_dir_path / "run_summary.json",
+        meta={
+            "benchmark": "swe_qa_bench",
+            "model": model or config.get("model", {}).get("model_name"),
+            "model_class": model_class or config.get("model", {}).get("model_class"),
+            "method": method,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+        instance_summaries=instance_summaries,
+        csv_path=output_dir_path / "run_summary.csv",
+    )

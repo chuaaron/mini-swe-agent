@@ -70,18 +70,31 @@ agent:
     - Entity format: "path/to/file.py:entity_name" (function, class, or method).
 
     ## Final output
-    When you are done, output ONLY a valid JSON object with these keys:
-    - found_files: list of file paths
-    - found_entities: list of "path:entity" strings
-    - found_modules: list of "path:module" strings (optional)
+    When you are done, output ONLY a valid JSON object with this key:
+    - functions: list of objects, each with:
+      - function: function name (required)
+      - file_hint: file name or partial path hint (required unless function is globally unique)
 
     Submit by running a single command that prints:
     - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
     - line 2: the JSON payload
 
     Example:
-    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"found_files":["path/to/file.py"],"found_entities":["path/to/file.py:my_func"],"found_modules":["path/to/file.py:my_func"]}\n'
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
     </instructions>
+  final_prompt_template: |
+    You have reached the maximum step limit. You must provide your final result now.
+    Do NOT run any more commands or tools.
+
+    Output ONLY the final JSON payload with this key:
+    - functions: list of {"function","file_hint"}
+
+    Submit by running exactly ONE command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
   action_observation_template: |
     {% if output.type == "tool" -%}
     <tool_result>
@@ -167,7 +180,7 @@ agent:
     </output_tail>
     {%- endif %}
     Please try another command and make sure to avoid those requiring interactive input.
-  step_limit: 120
+  step_limit: 20
   cost_limit: 3.
 
 environment:
@@ -175,7 +188,7 @@ environment:
   repo_mount_mode: single
   image: locbench-minisweagent:latest
   cwd: "/"
-  timeout: 60
+  timeout: 120
   env:
     PAGER: cat
     MANPAGER: cat
@@ -189,3 +202,7 @@ run:
     git -c safe.directory=* clone --no-hardlinks {{ repo_mount_path_q }} {{ workdir_q }} &&
     cd {{ workdir_q }} &&
     git checkout -q {{ base_commit_q }}
+  env_teardown_command: |
+    cd {{ workdir_q }} &&
+    git reset --hard &&
+    git clean -fd

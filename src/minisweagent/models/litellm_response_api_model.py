@@ -1,4 +1,5 @@
 import logging
+import os
 from collections.abc import Callable
 
 import litellm
@@ -32,7 +33,7 @@ class LitellmResponseAPIModel(LitellmModel):
 
     @retry(
         reraise=True,
-        stop=stop_after_attempt(10),
+        stop=stop_after_attempt(int(os.getenv("MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT", "3"))),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         retry=retry_if_not_exception_type(
@@ -51,9 +52,11 @@ class LitellmResponseAPIModel(LitellmModel):
         try:
             # Remove 'timestamp' field added by agent - not supported by OpenAI responses API
             clean_messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+            attempt_messages = clean_messages if self._previous_response_id is None else clean_messages[-1:]
+            self._last_attempt_prompt_tokens = self._token_tracker.add_attempt(messages=attempt_messages)
             resp = litellm.responses(
                 model=self.config.model_name,
-                input=clean_messages if self._previous_response_id is None else clean_messages[-1:],
+                input=attempt_messages,
                 previous_response_id=self._previous_response_id,
                 **(self.config.model_kwargs | kwargs),
             )
@@ -75,6 +78,7 @@ class LitellmResponseAPIModel(LitellmModel):
             messages=payload_messages,
             response=response_dict,
             completion_text=text,
+            attempt_prompt_tokens=self._last_attempt_prompt_tokens,
         )
         self.prompt_tokens = self._token_tracker.prompt_tokens
         self.completion_tokens = self._token_tracker.completion_tokens

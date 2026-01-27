@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +14,8 @@ from typing import Any, Iterable
 
 import requests
 
+
+_JUDGE_SYSTEM_PROMPT = "You are a helpful assistant"
 
 _PROMPT_TEMPLATE = """You are a professional evaluator. Please rate the candidate answer against the reference answer based on five criteria.
 Evaluation Criteria and Scoring Guidelines (each scored 1 to 10):
@@ -122,7 +125,7 @@ def _call_judge(
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
     }
@@ -198,6 +201,7 @@ def _score_records(
     judge_model: str,
     max_workers: int,
     timeout: int,
+    pass_threshold: float,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
@@ -221,6 +225,7 @@ def _score_records(
         )
         if scores is None:
             return None
+        score_avg = sum(scores.values()) / len(scores)
         return {
             "question": question,
             "candidate_answer": candidate_answer,
@@ -231,6 +236,8 @@ def _score_records(
             "relevance": scores["relevance"],
             "reasoning": scores["reasoning"],
             "total_score": sum(scores.values()),
+            "score_avg": score_avg,
+            "pass": score_avg >= pass_threshold,
         }
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -253,6 +260,7 @@ def score_dataset(
     repos: list[str] | None,
     max_workers: int,
     timeout: int,
+    pass_threshold: float,
     output_root: Path | None = None,
 ) -> None:
     reference_dir = dataset_root / "reference"
@@ -263,6 +271,10 @@ def score_dataset(
         candidate_base = output_root / "answers" / candidate_model / method
         output_base = output_root / "scores" / candidate_model / method
 
+    scored_repos: list[str] = []
+    total_scored = 0
+    total_passed = 0
+    total_score_avg = 0.0
     for repo in _iter_repos(reference_dir, repos):
         candidate_path = candidate_base / f"{repo}.jsonl"
         reference_path = reference_dir / f"{repo}.jsonl"
@@ -282,6 +294,7 @@ def score_dataset(
             judge_model,
             max_workers,
             timeout,
+            pass_threshold,
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -290,6 +303,37 @@ def score_dataset(
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"Scored {repo}: {len(results)} records -> {output_path}")
+        scored_repos.append(repo)
+        total_scored += len(results)
+        total_passed += sum(1 for record in results if record.get("pass"))
+        total_score_avg += sum(float(record.get("score_avg", 0.0)) for record in results)
+
+    prompt_hash = hashlib.sha256(f"{_JUDGE_SYSTEM_PROMPT}{_PROMPT_TEMPLATE}".encode("utf-8")).hexdigest()[:8]
+    summary_path = output_base / "run_summary.json"
+    avg_score = total_score_avg / total_scored if total_scored else 0.0
+    pass_rate = total_passed / total_scored if total_scored else 0.0
+    summary_payload = {
+        "meta": {
+            "benchmark": "swe_qa_bench",
+            "candidate_model": candidate_model,
+            "method": method,
+            "judge_config": {
+                "model": judge_model,
+                "prompt_hash": prompt_hash,
+                "temperature": 0.0,
+            },
+        },
+        "stats_overall": {
+            "repos_scored": len(scored_repos),
+            "total_records": total_scored,
+            "pass_rate": pass_rate,
+            "avg_score": avg_score,
+            "pass_threshold": pass_threshold,
+        },
+        "repos": scored_repos,
+    }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False))
 
 
 def main() -> None:
@@ -303,6 +347,12 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("JUDGE_MAX_WORKERS", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.getenv("JUDGE_TIMEOUT", "60")))
     parser.add_argument("--repos", default="", help="Comma-separated repo list (optional)")
+    parser.add_argument(
+        "--pass-threshold",
+        type=float,
+        default=float(os.getenv("SWE_QA_PASS_THRESHOLD", "7")),
+        help="Score average threshold for pass (default: 7).",
+    )
     args = parser.parse_args()
 
     if not args.candidate_model:
@@ -331,6 +381,7 @@ def main() -> None:
         repos=repos,
         max_workers=args.max_workers,
         timeout=args.timeout,
+        pass_threshold=args.pass_threshold,
     )
 
 

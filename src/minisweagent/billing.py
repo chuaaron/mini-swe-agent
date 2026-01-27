@@ -65,6 +65,11 @@ def _estimate_tokens(
     return prompt_tokens, completion_tokens, total_tokens
 
 
+def _estimate_prompt_tokens(messages: list[dict[str, str]], estimate_cfg: dict[str, Any]) -> int:
+    prompt_tokens, _, _ = _estimate_tokens(messages, "", estimate_cfg)
+    return prompt_tokens
+
+
 class TokenTracker:
     def __init__(
         self,
@@ -78,6 +83,9 @@ class TokenTracker:
         self.completion_tokens = 0
         self.total_tokens = 0
         self.api_calls = 0
+        self.billed_prompt_tokens = 0
+        self.billed_completion_tokens = 0
+        self.billed_tokens = 0
         self._estimate_failed = False
 
         billing = billing if isinstance(billing, dict) else {}
@@ -85,12 +93,27 @@ class TokenTracker:
         self._estimate_cfg = billing.get("estimate", {}) if isinstance(billing.get("estimate"), dict) else {}
         self._resolved_mode = ""
 
+    def add_attempt(self, *, messages: list[dict[str, str]]) -> int:
+        """Record a prompt-only token estimate for a single model attempt."""
+        try:
+            prompt_tokens = _estimate_prompt_tokens(messages, self._estimate_cfg)
+        except Exception as exc:
+            prompt_tokens = 0
+            if self.model_name not in _WARNED_ESTIMATE_FAIL:
+                _WARNED_ESTIMATE_FAIL.add(self.model_name)
+                logger.warning("Token estimate failed for model '%s': %s", self.model_name, exc)
+
+        self.billed_prompt_tokens += prompt_tokens
+        self.billed_tokens = self.billed_prompt_tokens + self.billed_completion_tokens
+        return prompt_tokens
+
     def add_call(
         self,
         *,
         messages: list[dict[str, str]],
         response: dict[str, Any],
         completion_text: str,
+        attempt_prompt_tokens: int | None = None,
     ) -> dict[str, Any]:
         self.api_calls += 1
         usage = _extract_usage(response)
@@ -130,6 +153,12 @@ class TokenTracker:
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
         self.total_tokens += total_tokens
+        if attempt_prompt_tokens is None:
+            self.billed_prompt_tokens += prompt_tokens
+        else:
+            self.billed_prompt_tokens += prompt_tokens - attempt_prompt_tokens
+        self.billed_completion_tokens += completion_tokens
+        self.billed_tokens = self.billed_prompt_tokens + self.billed_completion_tokens
         if mode in {"usage", "estimate", "none"}:
             self._resolved_mode = mode
 
@@ -146,6 +175,8 @@ class TokenTracker:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
+            "trace_tokens": self.total_tokens,
+            "billed_tokens": self.billed_tokens,
             "cost_usd": 0.0,
             "api_calls": self.api_calls,
             "billing_mode": self._resolved_mode or self._billing_mode,

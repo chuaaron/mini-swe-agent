@@ -27,13 +27,17 @@ from minisweagent.environments import get_environment
 from minisweagent.environments.repo_mounts import build_repo_mount_args
 from minisweagent.models import get_model
 from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
+from minisweagent.run.extra.utils.run_summary import write_run_summary
 from minisweagent.run.utils.save import save_traj
 from minisweagent.locbench.config_loader import project_root
 from minisweagent.locbench.utils import (
     build_answer_stats,
+    compute_locbench_metrics,
     build_loc_output,
     build_repo_dir_name,
     build_repo_path,
+    build_fallback_loc_result,
+    extract_json_payload,
     filter_instances,
     load_existing_instance_ids,
     load_jsonl,
@@ -47,6 +51,15 @@ from minisweagent.utils.log import add_file_handler, logger
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 _WORKTREE_LOCK = threading.Lock()
+
+
+def _get_last_assistant_content(agent: ToolAgent | None) -> str:
+    if agent is None:
+        return ""
+    for message in reversed(agent.messages):
+        if message.get("role") == "assistant":
+            return message.get("content", "") or ""
+    return ""
 
 
 class ProgressTrackingAgent(ToolAgent):
@@ -299,6 +312,21 @@ def _cleanup_environment(env: Any) -> None:
         env.cleanup()
 
 
+def _run_teardown_command(env: Any, config: dict[str, Any], instance: dict[str, Any]) -> None:
+    if env is None:
+        return
+    teardown_command = config.get("run", {}).get("env_teardown_command")
+    if not teardown_command:
+        return
+    try:
+        rendered = Template(teardown_command, undefined=StrictUndefined).render(**instance)
+        out = env.execute(rendered)
+        if out.get("returncode", 0) != 0:
+            logger.warning("Teardown command failed for %s: %s", instance.get("instance_id"), out)
+    except Exception as exc:
+        logger.warning("Teardown command error for %s: %s", instance.get("instance_id"), exc)
+
+
 def _append_loc_output(path: Path, record: dict[str, Any]) -> None:
     with _OUTPUT_FILE_LOCK:
         append_jsonl(path, record)
@@ -359,6 +387,8 @@ def _process_instance(
     worktree_root: Path,
     worktrees_mode: str,
     keep_worktrees: bool,
+    summary_sink: list[dict[str, Any]],
+    summary_lock: threading.Lock,
 ) -> None:
     instance_id = instance["instance_id"]
     instance_dir = output_dir / instance_id
@@ -405,6 +435,11 @@ def _process_instance(
             **config.get("agent", {}),
         )
         exit_status, result = agent.run(task, **instance)
+        if exit_status == "LimitsExceeded":
+            fallback_text = _get_last_assistant_content(agent)
+            if fallback_text:
+                payload, raw = extract_json_payload(fallback_text)
+                result = raw if payload is not None and raw else build_fallback_loc_result(fallback_text)
         stats = build_answer_stats(model)
     except Exception as exc:
         logger.error("Error processing instance %s: %s", instance_id, exc, exc_info=True)
@@ -412,6 +447,7 @@ def _process_instance(
         extra_info = {"traceback": traceback.format_exc()}
         stats = build_answer_stats(model) if model else None
     finally:
+        _run_teardown_command(env, config, instance)
         _cleanup_environment(env)
         if worktree_path and not keep_worktrees:
             _remove_worktree(repo_path, worktree_path)
@@ -424,8 +460,39 @@ def _process_instance(
             instance_id=instance_id,
             print_fct=logger.info,
         )
-        output_record = build_loc_output(result, instance_id, bench_data.get(instance_id), stats=stats)
+        billing_stats = model.get_billing_stats() if model and hasattr(model, "get_billing_stats") else {}
+        output_record = build_loc_output(
+            result,
+            instance_id,
+            bench_data.get(instance_id),
+            stats=stats,
+            repo_root=instance.get("repo_source_path") or instance.get("repo_path"),
+        )
+        output_record["exit_status"] = exit_status
+        output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
+        output_record["trace_tokens"] = billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0))
+        output_record["billed_tokens"] = billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0))
+        metrics = compute_locbench_metrics(
+            bench_data.get(instance_id),
+            output_record.get("found_files", []),
+            output_record.get("found_entities", []),
+        )
+        output_record.update(metrics)
         _append_loc_output(loc_output_path, output_record)
+        summary_record = {
+            "instance_id": instance_id,
+            "exit_status": exit_status,
+            "steps": getattr(model, "n_calls", 0) if model else 0,
+            "trace_tokens": billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0)),
+            "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
+            "cost_usd": billing_stats.get("cost_usd", getattr(model, "cost", 0.0)),
+            "correct": metrics.get("correct"),
+        }
+        for key, value in metrics.items():
+            if key != "correct":
+                summary_record[key] = value
+        with summary_lock:
+            summary_sink.append(summary_record)
         progress_manager.on_instance_end(instance_id, exit_status)
 
 
@@ -527,6 +594,8 @@ def run_tools(
     logger.info("Running on %s instances...", len(instances))
 
     progress_manager = RunBatchProgressManager(len(instances), output_dir_path / f"exit_statuses_{time.time()}.yaml")
+    instance_summaries: list[dict[str, Any]] = []
+    summary_lock = threading.Lock()
 
     def process_futures(futures: dict[concurrent.futures.Future, str]):
         for future in concurrent.futures.as_completed(futures):
@@ -555,6 +624,8 @@ def run_tools(
                     worktrees_root,
                     worktrees_mode,
                     keep_worktrees,
+                    instance_summaries,
+                    summary_lock,
                 ): instance["instance_id"]
                 for instance in instances
             }
@@ -568,3 +639,15 @@ def run_tools(
             pass
 
     progress_manager.print_report()
+    write_run_summary(
+        output_dir_path / "run_summary.json",
+        meta={
+            "benchmark": "locbench",
+            "model": model or config.get("model", {}).get("model_name"),
+            "model_class": model_class or config.get("model", {}).get("model_class"),
+            "method": method,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+        instance_summaries=instance_summaries,
+        csv_path=output_dir_path / "run_summary.csv",
+    )
