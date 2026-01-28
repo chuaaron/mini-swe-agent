@@ -378,6 +378,7 @@ def _build_instances(
 def _process_instance(
     instance: dict[str, Any],
     output_dir: Path,
+    trajectories_dir: Path,
     loc_output_path: Path,
     config: dict[str, Any],
     tool_registry: ToolRegistry,
@@ -391,9 +392,9 @@ def _process_instance(
     summary_lock: threading.Lock,
 ) -> None:
     instance_id = instance["instance_id"]
-    instance_dir = output_dir / instance_id
-    instance_dir.mkdir(parents=True, exist_ok=True)
-    (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    traj_path = trajectories_dir / f"{instance_id}.traj.json"
+    traj_path.unlink(missing_ok=True)
     model = get_model(config=config.get("model", {}))
     task = instance.get("problem_statement", "")
 
@@ -453,7 +454,7 @@ def _process_instance(
             _remove_worktree(repo_path, worktree_path)
         save_traj(
             agent,
-            instance_dir / f"{instance_id}.traj.json",
+            traj_path,
             exit_status=exit_status,
             result=result,
             extra_info=extra_info,
@@ -566,6 +567,10 @@ def run_tools(
     add_file_handler(output_dir_path / "minisweagent.log")
     logger.info("Results will be saved to %s", output_dir_path)
 
+    trajectories_dir = output_dir_path / "trajectories"
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Trajectories will be saved to %s", trajectories_dir)
+
     loc_output_path = _default_loc_output(output_root, output_model_name, method)
     logger.info("Loc outputs will be saved to %s", loc_output_path)
 
@@ -615,6 +620,7 @@ def run_tools(
                     _process_instance,
                     instance,
                     output_dir_path,
+                    trajectories_dir,
                     loc_output_path,
                     config,
                     tool_registry,

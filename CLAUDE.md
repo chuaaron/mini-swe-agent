@@ -10,7 +10,7 @@ mini-SWE-agent is a minimal AI software engineering agent (~100 lines of core lo
 
 The project follows a modular, polymorphic design with three core components (defined as Protocols in `src/minisweagent/__init__.py`):
 
-- **Agent** (`src/minisweagent/agents/`): Control flow and loop. The `DefaultAgent` implements a simple step loop: query model -> parse action -> execute -> observe.
+- **Agent** (`src/minisweagent/agents/`): Control flow and loop. `DefaultAgent` implements a simple step loop: query model -> parse action -> execute -> observe. `ToolAgent` extends this with `@tool` command support.
 - **Environment** (`src/minisweagent/environments/`): Executes agent actions via bash. Supports local, docker, singularity, and other sandboxes.
 - **Model** (`src/minisweagent/models/`): Language model interfaces. Defaults to `LitellmModel` for broad model compatibility.
 
@@ -21,7 +21,9 @@ The project follows a modular, polymorphic design with three core components (de
 Entry points are in `src/minisweagent/run/`:
 - `mini.py` - Main CLI (`mini` command), interactive/visual modes
 - `hello_world.py` - Minimal example showing the core pattern
-- `extra/` - Additional utilities (swebench, inspector, github_issue, etc.)
+- `extra/` - Additional utilities (swebench, inspector, github_issue, locbench, etc.)
+
+Every run script follows the same pattern: instantiate one Agent, one Environment, and one Model, then call `agent.run(task)`.
 
 **Every use case should start with a run script** that picks one agent, environment, and model class.
 
@@ -31,6 +33,8 @@ Config files use YAML with Jinja2 templates stored in `src/minisweagent/config/`
 - `default.yaml` - Base configuration
 - `mini.yaml` - For `mini` CLI (adds confirm mode, $3 cost limit)
 - `extra/` - Task-specific configs (swebench, github issues, etc.)
+
+Config discovery order: current dir → `MSWEA_CONFIG_DIR` env var → built-in → built-in/extra.
 
 Templates receive variables from agent config, environment, and model via `get_template_vars()` methods. The agent parses bash commands from LM responses using a regex (default: ```bash blocks).
 
@@ -54,20 +58,23 @@ pre-commit run --all-files
 
 # Run tests
 pytest                          # Run all tests
+pytest -n auto                  # Run with parallel execution
 pytest tests/path/to/test.py    # Run specific test file
 pytest -k "test_name"           # Run tests matching pattern
 pytest -k "not slow"            # Skip slow tests
 pytest -x                       # Stop on first failure
 ```
 
-## Code Style (from .cursor/rules and .github/copilot-instructions.md)
+## Code Style
+
+From `.cursor/rules/` and project conventions:
 
 - Target Python 3.10+
 - Use type annotations (`list` not `List`)
 - Use `pathlib` instead of `os.path`; prefer `Path.read_text()` over `with ...open()`
 - Use `typer` for CLI interfaces
 - Use `jinja2` for templates
-- Use `dataclass` (pydantic `BaseModel`) for config
+- Use `pydantic BaseModel` for config (not dataclass unless specifically needed)
 - Keep code minimal and concise—this repository rewards brevity
 - Don't catch exceptions unless explicitly told to
 - Avoid initializing variables just to pass them—pass expressions directly
@@ -83,13 +90,15 @@ pytest -x                       # Stop on first failure
 
 ## Key Implementation Details
 
-### Agent Control Flow (src/minisweagent/agents/default.py)
+### Agent Control Flow (src/minisweagent/agents/)
 
 The agent uses exception-based control flow:
 - `NonTerminatingException` (FormatError, ExecutionTimeoutError) - fed back to LM as user message
 - `TerminatingException` (Submitted, LimitsExceeded) - ends the run
 
 The agent finishes when the LM outputs `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` (checked in `has_finished()`).
+
+`ToolAgent` extends `DefaultAgent` with `@tool` command support via a `ToolRegistry`. Tool commands start with `@tool` and are executed by the registry instead of the bash environment.
 
 ### Template Variables
 
@@ -108,6 +117,8 @@ Models are selected via `get_model()` in `src/minisweagent/models/__init__.py`:
 
 Anthropic models get `set_cache_control="default_end"` by default for prompt caching.
 
+Global token/call limits can be set via `MSWEA_GLOBAL_COST_LIMIT` and `MSWEA_GLOBAL_CALL_LIMIT` env vars (tracked in `GLOBAL_TOKEN_STATS`).
+
 ### Adding New Components
 
 To add a new agent, environment, or model:
@@ -116,10 +127,16 @@ To add a new agent, environment, or model:
 3. Implement `get_template_vars()` to provide template variables
 4. Create a run script or register in mapping dicts
 
+### Environment Selection
+
+Environments are selected via `get_environment()` in `src/minisweagent/environments/__init__.py`:
+- Shortcut names: "local", "docker", "singularity", "swerex_docker", "swerex_modal", "bubblewrap"
+- Full import path: `"minisweagent.environments.local.LocalEnvironment"`
+- Default: `LocalEnvironment`
+
 ## Configuration Paths
 
 - Global config: `~/.config/mini-swe-agent/.env` (env vars, API keys)
 - Built-in configs: `src/minisweagent/config/`
-- Config discovery: current dir → `MSWEA_CONFIG_DIR` → built-in → built-in/extra
 
 Set `MSWEA_MODEL_NAME` env var or use config to specify default model.

@@ -314,9 +314,10 @@ def process_instance(
     summary_lock: threading.Lock,
 ) -> None:
     instance_id = instance["instance_id"]
-    instance_dir = output_dir / instance_id
-    instance_dir.mkdir(parents=True, exist_ok=True)
-    (instance_dir / f"{instance_id}.traj.json").unlink(missing_ok=True)
+    trajectories_dir = output_dir / "trajectories"
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    traj_path = trajectories_dir / f"{instance_id}.traj.json"
+    traj_path.unlink(missing_ok=True)
 
     model = get_model(config=config.get("model", {}))
     question = instance["question"]
@@ -402,7 +403,7 @@ def process_instance(
     }
     save_traj(
         agent,
-        instance_dir / f"{instance_id}.traj.json",
+        traj_path,
         print_fct=logger.info,
         exit_status=exit_status,
         result=result,
