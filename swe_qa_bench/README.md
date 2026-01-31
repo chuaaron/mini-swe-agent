@@ -30,7 +30,8 @@ env:
 ```bash
 cd /Users/chz/code/locbench/mini-swe-agent
 PYTHONPATH=src python -m minisweagent.run_swe_qa \
-  --mode bash --repos requests --slice 0:1 --workers 1
+  --mode bash --repos requests --slice 0:1 --workers 1 \
+  --run-id 20260131_120000
 ```
 
 ## Command Cheat Sheet
@@ -44,9 +45,18 @@ PYTHONPATH=src python -m minisweagent.run_swe_qa \
 ### B) Tools（bash + code_search）
 ```bash
 PYTHONPATH=src python -m minisweagent.run_swe_qa \
-  --mode tools --repos requests --workers 1
+  --mode tools --repos requests --workers 1 \
+  --run-id 20260131_120000
 ```
 说明：首次 tools 运行会为该 repo 自动构建索引（只建当前 repo，不会全量建）。
+
+### E) Resume（断点续跑）
+```bash
+PYTHONPATH=src python -m minisweagent.run_swe_qa \
+  --mode tools --repos requests --slice 0:200 --workers 4 \
+  --resume 20260131_120000
+```
+说明：`--resume` 会接着指定 `run_id` 跑，并跳过已有答案（不会覆盖）。
 
 ### C) 切片调试
 ```bash
@@ -64,14 +74,14 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score_from_yaml \
 
 你只需要看这两个目录：
 
-1) 最终答案（用于评分）
+1) 最终答案（用于评分，已 run_id 隔离）
 ```
-/Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/results/answers/<model>/<method>/<repo>.jsonl
+/Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/results/<run_id>/answers/<model>/<method>/<repo>.jsonl
 ```
 
-2) 运行日志与轨迹（用于排错）
+2) 运行日志与轨迹（用于排错，已 run_id 隔离）
 ```
-/Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/outputs/<model>/<method>/<timestamp>/
+/Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/results/<run_id>/outputs/<model>/<method>/<timestamp>/
 ```
 
 ## Migration

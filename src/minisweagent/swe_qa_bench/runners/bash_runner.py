@@ -211,10 +211,9 @@ def _filter_instances(
     return instances
 
 
-def _default_output_dir(output_model_name: str, method: str) -> Path:
+def _default_output_dir(output_root: Path, output_model_name: str, method: str) -> Path:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    root_dir = package_dir.parents[1] / "swe_qa_bench"
-    return root_dir / "outputs" / output_model_name / method / timestamp
+    return output_root / "outputs" / output_model_name / method / timestamp
 
 
 def _get_answer_path(output_root: Path, output_model_name: str, method: str, repo: str) -> Path:
@@ -447,9 +446,14 @@ def run_bash(
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
 
-    default_output_dir = _default_output_dir(output_model_name, method)
+    default_output_dir = _default_output_dir(output_root, output_model_name, method)
     if output_dir:
         output_dir_path = Path(output_dir)
+        if not output_dir_path.is_absolute():
+            output_dir_path = output_root / output_dir_path
+        elif output_root not in output_dir_path.parents and output_dir_path != output_root:
+            logger.warning("output_dir outside run root; forcing under %s", output_root)
+            output_dir_path = default_output_dir
     else:
         output_dir_path = default_output_dir
     output_dir_path.mkdir(parents=True, exist_ok=True)

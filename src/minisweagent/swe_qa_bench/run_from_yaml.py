@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,13 @@ def _normalize_optional(value: Any) -> str | None:
     return text or None
 
 
+def _normalize_run_id(value: Any) -> str:
+    text = _normalize_optional(value)
+    if text:
+        return text
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
 def _normalize_tools_prompt(value: Any) -> str:
     text = _normalize_optional(value)
     if not text:
@@ -122,6 +130,11 @@ def main() -> None:
     if mode == "tools" and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
         raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
 
+    resume = bool(config.get("resume", False))
+    run_id = _normalize_run_id(config.get("run_id"))
+    if resume and not run_id:
+        raise ValueError("resume requires run_id")
+
     method = _get_method(mode, config.get("method"))
     effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
     output_dir = _normalize_optional(config.get("output_dir")) or ""
@@ -130,6 +143,8 @@ def main() -> None:
     model = _normalize_optional(config.get("model"))
     model_class = _normalize_optional(config.get("model_class"))
     redo_existing = bool(config.get("redo_existing", False))
+    if resume:
+        redo_existing = False
     billing = config.get("billing")
     pricing = None
 
@@ -141,11 +156,14 @@ def main() -> None:
     else:
         agent_config_path = _default_agent_config(mode)
 
+    run_root = output_root / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+
     if mode == "bash":
         runner = bash_runner.BashRunner(
             dataset_root=dataset_root,
             repos_root=repos_root,
-            output_root=output_root,
+            output_root=run_root,
             repos=[item for item in repos.split(",") if item] if repos else [],
             slice_spec=slice_spec,
             shuffle=shuffle,
@@ -171,7 +189,7 @@ def main() -> None:
     runner = tools_runner.ToolsRunner(
         dataset_root=dataset_root,
         repos_root=repos_root,
-        output_root=output_root,
+            output_root=run_root,
         repos=[item for item in repos.split(",") if item] if repos else [],
         slice_spec=slice_spec,
         shuffle=shuffle,

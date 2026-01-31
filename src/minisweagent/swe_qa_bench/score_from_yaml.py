@@ -68,6 +68,10 @@ def main() -> None:
     if output_root_value is None:
         output_root_value = (local_config.get("paths", {}) if isinstance(local_config, dict) else {}).get("output_root")
     output_root = Path(str(output_root_value)).expanduser().resolve() if output_root_value else None
+    run_id = _normalize_optional(config.get("run_id"))
+    resume = bool(config.get("resume", False))
+    if resume and not run_id:
+        raise ValueError("resume requires run_id")
     candidate_model = _normalize_optional(config.get("candidate_model"))
     method = _normalize_optional(config.get("method"))
     judge_model = _normalize_optional(config.get("judge_model"))
@@ -76,6 +80,13 @@ def main() -> None:
     max_workers = int(config.get("max_workers", 8))
     timeout = int(config.get("timeout", 60))
     repos = _as_repos(config.get("repos"))
+    pass_threshold = float(config.get("pass_threshold", 7))
+    pass_metric = _normalize_optional(config.get("pass_metric")) or "weighted"
+    judge_rounds = int(config.get("judge_rounds", 1))
+    judge_agg = _normalize_optional(config.get("judge_agg")) or "median"
+    weights = config.get("weights")
+    category_map_value = _normalize_optional(config.get("category_map"))
+    category_map_path = Path(category_map_value).expanduser().resolve() if category_map_value else None
 
     if not candidate_model:
         raise ValueError("candidate_model must be set")
@@ -104,7 +115,15 @@ def main() -> None:
         repos=repos,
         max_workers=max_workers,
         timeout=timeout,
+        pass_threshold=pass_threshold,
         output_root=output_root,
+        run_id=run_id,
+        pass_metric=pass_metric,
+        weights=weights,
+        judge_rounds=judge_rounds,
+        judge_agg=judge_agg,
+        category_map_path=category_map_path,
+        resume=resume,
     )
 
 

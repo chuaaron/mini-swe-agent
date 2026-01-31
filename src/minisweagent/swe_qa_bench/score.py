@@ -8,11 +8,14 @@ import argparse
 import hashlib
 import json
 import os
+import statistics
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Iterable
 
 import requests
+import yaml
 
 
 _JUDGE_SYSTEM_PROMPT = "You are a helpful assistant"
@@ -110,6 +113,45 @@ def _parse_scores(text: str) -> dict[str, int] | None:
     return {key: int(scores[key]) for key in keys}
 
 
+def _question_hash(question: str) -> str:
+    return hashlib.sha256(question.encode("utf-8")).hexdigest()[:8]
+
+
+def _load_category_map(path: Path | None) -> dict[str, dict[str, str]]:
+    if not path:
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("category_map must be a YAML mapping")
+    return {
+        "category": data.get("question_hash_to_category", {}) or {},
+        "difficulty": data.get("question_hash_to_difficulty", {}) or {},
+    }
+
+
+def _normalize_weights(weights: dict[str, float] | None) -> dict[str, float]:
+    keys = ["correctness", "completeness", "relevance", "clarity", "reasoning"]
+    if not weights:
+        return {key: 0.2 for key in keys}
+    normalized: dict[str, float] = {}
+    total = 0.0
+    for key in keys:
+        value = float(weights.get(key, 0.0))
+        normalized[key] = value
+        total += value
+    if total <= 0:
+        return {key: 0.2 for key in keys}
+    return {key: value / total for key, value in normalized.items()}
+
+
+def _aggregate(values: list[int], mode: str) -> float:
+    if not values:
+        return 0.0
+    if mode == "median":
+        return float(statistics.median(values))
+    return float(sum(values)) / len(values)
+
+
 def _call_judge(
     *,
     api_url: str,
@@ -187,6 +229,81 @@ def _build_reference_dict(reference_path: Path) -> dict[str, str]:
     return reference_dict
 
 
+def _format_float(value: float) -> str:
+    return f"{value:.4f}"
+
+
+def _write_markdown_report(run_root: Path, summary: dict[str, Any]) -> None:
+    meta = summary.get("meta", {})
+    stats = summary.get("stats_overall", {})
+    dims = summary.get("stats_dimensions", {})
+    grouped = summary.get("grouped_stats", {})
+    judge = meta.get("judge_config", {})
+
+    lines: list[str] = []
+    lines.append("# SWE-QA-Bench Run Report")
+    lines.append("")
+    lines.append("## Summary Dashboard")
+    lines.append("")
+    lines.append("| run_id | model | pass_rate | weighted_score | avg_score |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    lines.append(
+        f"| {summary.get('run_id','')} | {meta.get('candidate_model','')} | "
+        f"{_format_float(stats.get('pass_rate',0.0))} | "
+        f"{_format_float(stats.get('avg_weighted_score',0.0))} | "
+        f"{_format_float(stats.get('avg_score',0.0))} |"
+    )
+    lines.append("")
+
+    lines.append("## Category Analysis")
+    lines.append("")
+    lines.append("| category | count | pass_rate | avg_score | avg_weighted_score |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    category_stats = (grouped or {}).get("category", {})
+    if category_stats:
+        for label, item in sorted(category_stats.items()):
+            lines.append(
+                f"| {label} | {item.get('count',0)} | "
+                f"{_format_float(item.get('pass_rate',0.0))} | "
+                f"{_format_float(item.get('avg_score',0.0))} | "
+                f"{_format_float(item.get('avg_weighted_score',0.0))} |"
+            )
+    else:
+        lines.append("| (none) | 0 | 0.0000 | 0.0000 | 0.0000 |")
+    lines.append("")
+
+    lines.append("## Dimension Breakdown")
+    lines.append("")
+    lines.append("| correctness | completeness | relevance | clarity | reasoning |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    lines.append(
+        f"| {_format_float(dims.get('correctness',0.0))} | "
+        f"{_format_float(dims.get('completeness',0.0))} | "
+        f"{_format_float(dims.get('relevance',0.0))} | "
+        f"{_format_float(dims.get('clarity',0.0))} | "
+        f"{_format_float(dims.get('reasoning',0.0))} |"
+    )
+    lines.append("")
+
+    lines.append("## Judge Config")
+    lines.append("")
+    lines.append("| model | prompt_hash | rounds | agg | pass_metric | pass_threshold |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append(
+        f"| {judge.get('model','')} | {judge.get('prompt_hash','')} | "
+        f"{judge.get('rounds',1)} | {judge.get('agg','')} | "
+        f"{judge.get('pass_metric','')} | {stats.get('pass_threshold','')} |"
+    )
+    weights = judge.get("weights")
+    if weights:
+        lines.append("")
+        lines.append(f"weights: `{json.dumps(weights, ensure_ascii=False)}`")
+    lines.append("")
+
+    report_path = run_root / "README.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def _iter_repos(reference_dir: Path, repos: list[str] | None) -> list[str]:
     if repos:
         return repos
@@ -202,6 +319,12 @@ def _score_records(
     max_workers: int,
     timeout: int,
     pass_threshold: float,
+    pass_metric: str,
+    weights: dict[str, float],
+    judge_rounds: int,
+    judge_agg: str,
+    category_map: dict[str, dict[str, str]],
+    existing_hashes: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
@@ -209,35 +332,63 @@ def _score_records(
         question = (record.get("question") or "").strip()
         if not question:
             return None
+        question_id = _question_hash(question)
+        if existing_hashes and question_id in existing_hashes:
+            return None
         candidate_answer = record.get("final_answer") or record.get("answer") or ""
         candidate_answer = _normalize_answer(candidate_answer)
         reference = reference_dict.get(question, "")
         if not reference or not candidate_answer:
             return None
-        scores = score_answer(
-            question=question,
-            reference=reference,
-            candidate=candidate_answer,
-            api_url=api_url,
-            api_key=api_key,
-            model=judge_model,
-            timeout=timeout,
-        )
-        if scores is None:
+
+        rounds = max(1, int(judge_rounds))
+        per_round: list[dict[str, int]] = []
+        for _ in range(rounds):
+            scores = score_answer(
+                question=question,
+                reference=reference,
+                candidate=candidate_answer,
+                api_url=api_url,
+                api_key=api_key,
+                model=judge_model,
+                timeout=timeout,
+            )
+            if scores is None:
+                continue
+            per_round.append(scores)
+
+        if not per_round:
             return None
-        score_avg = sum(scores.values()) / len(scores)
+
+        aggregated: dict[str, float] = {}
+        for key in ["correctness", "completeness", "clarity", "relevance", "reasoning"]:
+            aggregated[key] = _aggregate([item[key] for item in per_round], judge_agg)
+
+        score_avg = sum(aggregated.values()) / len(aggregated)
+        weighted_score = sum(aggregated[key] * weights[key] for key in weights)
+        pass_score = weighted_score if pass_metric == "weighted" else score_avg
+
+        category = category_map.get("category", {}).get(question_id)
+        difficulty = category_map.get("difficulty", {}).get(question_id)
+
         return {
             "question": question,
+            "question_hash": question_id,
             "candidate_answer": candidate_answer,
             "reference": reference,
-            "correctness": scores["correctness"],
-            "completeness": scores["completeness"],
-            "clarity": scores["clarity"],
-            "relevance": scores["relevance"],
-            "reasoning": scores["reasoning"],
-            "total_score": sum(scores.values()),
+            "correctness": aggregated["correctness"],
+            "completeness": aggregated["completeness"],
+            "clarity": aggregated["clarity"],
+            "relevance": aggregated["relevance"],
+            "reasoning": aggregated["reasoning"],
+            "total_score": sum(aggregated.values()),
             "score_avg": score_avg,
-            "pass": score_avg >= pass_threshold,
+            "weighted_score": weighted_score,
+            "pass": pass_score >= pass_threshold,
+            "judge_rounds": rounds,
+            "judge_agg": judge_agg,
+            "category": category,
+            "difficulty": difficulty,
         }
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -262,19 +413,63 @@ def score_dataset(
     timeout: int,
     pass_threshold: float,
     output_root: Path | None = None,
+    run_id: str | None = None,
+    pass_metric: str = "weighted",
+    weights: dict[str, float] | None = None,
+    judge_rounds: int = 1,
+    judge_agg: str = "median",
+    category_map_path: Path | None = None,
+    resume: bool = False,
 ) -> None:
     reference_dir = dataset_root / "reference"
-    if output_root is None:
-        candidate_base = dataset_root / "answers" / candidate_model / method
-        output_base = dataset_root / "scores" / candidate_model / method
-    else:
-        candidate_base = output_root / "answers" / candidate_model / method
-        output_base = output_root / "scores" / candidate_model / method
+    base_root = output_root or dataset_root
+    if resume and not run_id:
+        raise ValueError("resume requires run_id")
+    run_id = run_id or time.strftime("%Y%m%d_%H%M%S")
+    run_root = base_root / run_id
+    candidate_base = run_root / "answers" / candidate_model / method
+    output_base = run_root / "scores" / candidate_model / method
+
+    weights = _normalize_weights(weights)
+    if pass_metric == "weighted_score":
+        pass_metric = "weighted"
+    if pass_metric == "score_avg":
+        pass_metric = "avg"
+    pass_metric = pass_metric if pass_metric in {"avg", "weighted"} else "weighted"
+    judge_agg = judge_agg if judge_agg in {"mean", "median"} else "median"
+    category_map = _load_category_map(category_map_path)
 
     scored_repos: list[str] = []
     total_scored = 0
     total_passed = 0
     total_score_avg = 0.0
+    total_weighted_score = 0.0
+    dim_totals = {key: 0.0 for key in ["correctness", "completeness", "relevance", "clarity", "reasoning"]}
+    dim_counts = 0
+    grouped: dict[str, dict[str, dict[str, Any]]] = {"category": {}, "difficulty": {}}
+
+    def _accumulate(records: Iterable[dict[str, Any]]) -> None:
+        nonlocal total_scored, total_passed, total_score_avg, total_weighted_score, dim_counts
+        for record in records:
+            total_scored += 1
+            total_passed += 1 if record.get("pass") else 0
+            total_score_avg += float(record.get("score_avg", 0.0))
+            total_weighted_score += float(record.get("weighted_score", 0.0))
+            for key in dim_totals:
+                dim_totals[key] += float(record.get(key, 0.0))
+            dim_counts += 1
+            for group_key in ["category", "difficulty"]:
+                group_value = record.get(group_key)
+                if not group_value:
+                    continue
+                bucket = grouped[group_key].setdefault(
+                    group_value,
+                    {"count": 0, "passed": 0, "score_sum": 0.0, "weighted_sum": 0.0},
+                )
+                bucket["count"] += 1
+                bucket["passed"] += 1 if record.get("pass") else 0
+                bucket["score_sum"] += float(record.get("score_avg", 0.0))
+                bucket["weighted_sum"] += float(record.get("weighted_score", 0.0))
     for repo in _iter_repos(reference_dir, repos):
         candidate_path = candidate_base / f"{repo}.jsonl"
         reference_path = reference_dir / f"{repo}.jsonl"
@@ -283,6 +478,16 @@ def score_dataset(
         if not candidate_path.exists() or not reference_path.exists():
             print(f"Skipping {repo}: missing candidate or reference file")
             continue
+
+        existing_hashes: set[str] | None = None
+        existing_records: list[dict[str, Any]] = []
+        if resume and output_path.exists():
+            existing_records = _read_jsonl(output_path)
+            existing_hashes = {
+                (record.get("question_hash") or "").strip()
+                for record in existing_records
+                if record.get("question_hash")
+            }
 
         reference_dict = _build_reference_dict(reference_path)
         candidate_records = _read_jsonl(candidate_path)
@@ -295,23 +500,42 @@ def score_dataset(
             max_workers,
             timeout,
             pass_threshold,
+            pass_metric,
+            weights,
+            judge_rounds,
+            judge_agg,
+            category_map,
+            existing_hashes,
         )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8") as handle:
+        file_mode = "a" if resume and output_path.exists() else "w"
+        with output_path.open(file_mode, encoding="utf-8") as handle:
             for record in results:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"Scored {repo}: {len(results)} records -> {output_path}")
         scored_repos.append(repo)
-        total_scored += len(results)
-        total_passed += sum(1 for record in results if record.get("pass"))
-        total_score_avg += sum(float(record.get("score_avg", 0.0)) for record in results)
+        if existing_records:
+            _accumulate(existing_records)
+        _accumulate(results)
 
     prompt_hash = hashlib.sha256(f"{_JUDGE_SYSTEM_PROMPT}{_PROMPT_TEMPLATE}".encode("utf-8")).hexdigest()[:8]
     summary_path = output_base / "run_summary.json"
     avg_score = total_score_avg / total_scored if total_scored else 0.0
+    avg_weighted = total_weighted_score / total_scored if total_scored else 0.0
     pass_rate = total_passed / total_scored if total_scored else 0.0
+    avg_dims = {key: (dim_totals[key] / dim_counts if dim_counts else 0.0) for key in dim_totals}
+    grouped_stats: dict[str, dict[str, Any]] = {"category": {}, "difficulty": {}}
+    for group_key, items in grouped.items():
+        for label, bucket in items.items():
+            count = bucket["count"]
+            grouped_stats[group_key][label] = {
+                "count": count,
+                "pass_rate": (bucket["passed"] / count) if count else 0.0,
+                "avg_score": (bucket["score_sum"] / count) if count else 0.0,
+                "avg_weighted_score": (bucket["weighted_sum"] / count) if count else 0.0,
+            }
     summary_payload = {
         "meta": {
             "benchmark": "swe_qa_bench",
@@ -321,6 +545,10 @@ def score_dataset(
                 "model": judge_model,
                 "prompt_hash": prompt_hash,
                 "temperature": 0.0,
+                "rounds": judge_rounds,
+                "agg": judge_agg,
+                "weights": weights,
+                "pass_metric": pass_metric,
             },
         },
         "stats_overall": {
@@ -328,12 +556,17 @@ def score_dataset(
             "total_records": total_scored,
             "pass_rate": pass_rate,
             "avg_score": avg_score,
+            "avg_weighted_score": avg_weighted,
             "pass_threshold": pass_threshold,
         },
+        "stats_dimensions": avg_dims,
+        "grouped_stats": grouped_stats,
         "repos": scored_repos,
+        "run_id": run_id,
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False))
+    _write_markdown_report(run_root, summary_payload)
 
 
 def main() -> None:
@@ -341,12 +574,20 @@ def main() -> None:
     parser.add_argument("--dataset-root", required=True, help="Path to SWE-QA-Bench datasets root")
     parser.add_argument("--candidate-model", default=os.getenv("MODEL"), help="Candidate model (answers dir)")
     parser.add_argument("--method", default=os.getenv("METHOD"), help="Method name (answers dir)")
+    parser.add_argument("--run-id", default=os.getenv("RUN_ID"), help="Run identifier (answers/scores dir)")
+    parser.add_argument("--resume", action="store_true", help="Resume scoring (skip existing)")
     parser.add_argument("--judge-model", default=os.getenv("JUDGE_MODEL"), help="Judge model name")
     parser.add_argument("--judge-api-base", default=os.getenv("JUDGE_API_BASE") or os.getenv("OPENAI_API_BASE"))
     parser.add_argument("--judge-api-key", default=os.getenv("JUDGE_API_KEY") or os.getenv("OPENAI_API_KEY"))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("JUDGE_MAX_WORKERS", "8")))
     parser.add_argument("--timeout", type=int, default=int(os.getenv("JUDGE_TIMEOUT", "60")))
     parser.add_argument("--repos", default="", help="Comma-separated repo list (optional)")
+    parser.add_argument("--output-root", default=os.getenv("OUTPUT_ROOT"), help="Results root (default: dataset root)")
+    parser.add_argument("--pass-metric", default=os.getenv("PASS_METRIC", "weighted"), help="avg or weighted")
+    parser.add_argument("--weights", default=os.getenv("SCORE_WEIGHTS", ""), help="JSON weights mapping")
+    parser.add_argument("--judge-rounds", type=int, default=int(os.getenv("JUDGE_ROUNDS", "1")))
+    parser.add_argument("--judge-agg", default=os.getenv("JUDGE_AGG", "median"), help="median or mean")
+    parser.add_argument("--category-map", default=os.getenv("CATEGORY_MAP", ""), help="Path to category_map.yaml")
     parser.add_argument(
         "--pass-threshold",
         type=float,
@@ -371,6 +612,15 @@ def main() -> None:
     api_url = _resolve_api_url(args.judge_api_base)
     repos = [item.strip() for item in args.repos.split(",") if item.strip()] if args.repos else None
 
+    weights = None
+    if args.weights:
+        try:
+            weights = json.loads(args.weights)
+        except json.JSONDecodeError:
+            raise SystemExit("weights must be a JSON mapping")
+    output_root = Path(args.output_root).expanduser().resolve() if args.output_root else None
+    category_map_path = Path(args.category_map).expanduser().resolve() if args.category_map else None
+
     score_dataset(
         dataset_root=Path(args.dataset_root).resolve(),
         candidate_model=args.candidate_model,
@@ -382,6 +632,14 @@ def main() -> None:
         max_workers=args.max_workers,
         timeout=args.timeout,
         pass_threshold=args.pass_threshold,
+        output_root=output_root,
+        run_id=args.run_id,
+        pass_metric=args.pass_metric,
+        weights=weights,
+        judge_rounds=args.judge_rounds,
+        judge_agg=args.judge_agg,
+        category_map_path=category_map_path,
+        resume=args.resume,
     )
 
 

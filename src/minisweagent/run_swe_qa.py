@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--model-root", help="Override paths.model_root (tools only)")
     parser.add_argument("--output-model-name", help="Override paths.output_model_name")
     parser.add_argument("--output-dir", help="Override run.output_dir")
+    parser.add_argument("--run-id", help="Run identifier (default: timestamp)")
+    parser.add_argument("--resume", help="Resume an existing run_id (implies skip existing)")
 
     parser.add_argument("--repos", help="Comma-separated repo list override")
     parser.add_argument("--slice", dest="slice_spec", help="Slice spec, e.g. 0:20")
@@ -57,6 +60,13 @@ def _normalize_optional(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_run_id(value: Any) -> str:
+    text = _normalize_optional(value)
+    if text:
+        return text
+    return time.strftime("%Y%m%d_%H%M%S")
 
 
 def _normalize_tools_prompt(value: Any) -> str:
@@ -92,6 +102,11 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["run"]["redo_existing"] = args.redo_existing
     if args.output_dir:
         overrides["run"]["output_dir"] = args.output_dir
+    if args.run_id:
+        overrides["run"]["run_id"] = args.run_id
+    if args.resume:
+        overrides["run"]["run_id"] = args.resume
+        overrides["run"]["resume"] = True
     if args.image:
         overrides["run"]["image"] = args.image
     if args.method:
@@ -182,6 +197,9 @@ def _log_summary(config: dict[str, Any], *, mode: str, agent_config: Path, tool_
         "agent_config": str(agent_config),
         "tool_config": str(tool_config) if tool_config else "",
         "tools_prompt": run_cfg.get("tools_prompt"),
+        "run_id": run_cfg.get("run_id"),
+        "resume": run_cfg.get("resume"),
+        "run_root": run_cfg.get("run_root"),
     }
 
     logger.info("Effective SWE-QA-Bench config summary:")
@@ -226,7 +244,13 @@ def main() -> None:
     shuffle = bool(run_cfg.get("shuffle", False))
     shuffle_seed = int(run_cfg.get("shuffle_seed", 42))
     workers = int(run_cfg.get("workers", 1))
+    resume = bool(run_cfg.get("resume", False))
+    run_id = _normalize_run_id(run_cfg.get("run_id"))
+    if resume and not run_id:
+        raise ValueError("resume requires run_id")
     redo_existing = bool(run_cfg.get("redo_existing", False))
+    if resume:
+        redo_existing = False
     output_dir = str(run_cfg.get("output_dir") or "")
     method = _default_method(mode, run_cfg.get("method"))
     image = _normalize_optional(run_cfg.get("image"))
@@ -269,6 +293,11 @@ def main() -> None:
         model_root = str(_resolve_path(model_root, "paths.model_root"))
 
     effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
+    run_cfg["run_id"] = run_id
+    run_cfg["resume"] = resume
+    run_root = output_root / run_id
+    run_cfg["run_root"] = str(run_root)
+    run_root.mkdir(parents=True, exist_ok=True)
 
     _log_summary(config, mode=mode, agent_config=agent_config, tool_config=tool_config)
 
@@ -276,7 +305,7 @@ def main() -> None:
         runner = runners.BashRunner(
             dataset_root=dataset_root,
             repos_root=repos_root,
-            output_root=output_root,
+            output_root=run_root,
             repos=repos,
             slice_spec=slice_spec,
             shuffle=shuffle,
@@ -300,7 +329,7 @@ def main() -> None:
     runner = runners.ToolsRunner(
         dataset_root=dataset_root,
         repos_root=repos_root,
-        output_root=output_root,
+        output_root=run_root,
         repos=repos,
         slice_spec=slice_spec,
         shuffle=shuffle,
