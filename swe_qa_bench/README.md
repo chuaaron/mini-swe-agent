@@ -70,6 +70,19 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score_from_yaml \
   --config /Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/config/score_bash.yaml
 ```
 
+### D2) 批量评分多个实验（答案在不同 run_id）
+```bash
+PYTHONPATH=src python -m minisweagent.swe_qa_bench.score \
+  --dataset-root /Users/chz/code/locbench/SWE-QA-Bench/SWE-QA-Bench/datasets \
+  --answers-roots /abs/path/to/swe_qa_bench/results/20260131_150000,/abs/path/to/swe_qa_bench/results/20260131_170000 \
+  --judge-model deepseek-v3.2 \
+  --judge-api-base https://api.chatanywhere.tech/v1/chat/completions \
+  --judge-api-key sk-xxxxxx
+```
+说明：
+- `answers_roots` 可传 run 目录或 `answers/` 目录（逗号分隔）。
+- `candidate_model` / `method` 可选，填写则作为过滤条件；不填则默认全选。
+
 ## Outputs
 
 你只需要看这两个目录：
@@ -82,6 +95,11 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score_from_yaml \
 2) 运行日志与轨迹（用于排错，已 run_id 隔离）
 ```
 /Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/results/<run_id>/outputs/<model>/<method>/<timestamp>/
+```
+
+3) 评分输出（已 run_id 隔离）
+```
+/Users/chz/code/locbench/mini-swe-agent/swe_qa_bench/results/<run_id>/scores/<model>/<method>/
 ```
 
 ## Migration

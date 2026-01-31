@@ -38,6 +38,10 @@ weights:
   relevance: 0.1
   clarity: 0.1
 category_map: /path/to/category_map.yaml
+answers_path: /abs/path/to/requests.jsonl
+answers_roots:
+  - /abs/path/to/swe_qa_bench/results/20260131_150000
+  - /abs/path/to/swe_qa_bench/results/20260131_170000
 judge_model: deepseek-v3.2
 judge_api_base: https://api.example.com/v1/chat/completions
 judge_api_key: sk-xxx
@@ -56,6 +60,9 @@ repos: ["requests"]
 - `pass_metric` 默认 `weighted`，评分以加权分判断是否通过。
 - `weights` 是 5 个维度的权重，可自定义。
 - `category_map` 可选，使用 `question_hash`(sha256[:8]) 进行分类统计。
+- `answers_path` 可选，直接指定 answers 文件路径（仅支持单个 repo）。
+- `answers_roots` 可选，批量评分多个 run 目录或 answers 目录（互斥于 `answers_path`）。
+- 当使用 `answers_roots` 时，`candidate_model`/`method` 可为空表示“全选”，也可填写作为过滤条件。
 
 ---
 
@@ -99,3 +106,6 @@ mini-swe-agent/swe_qa_bench/results/<run_id>/README.md
 
 4) **断点续评**
 - YAML 中设置 `resume: true`，并指定同一个 `run_id`。
+
+5) **批量评分多个实验**
+- 使用 `answers_roots` 指向多个 run 目录或 answers 目录（逗号分隔或 YAML 列表）。

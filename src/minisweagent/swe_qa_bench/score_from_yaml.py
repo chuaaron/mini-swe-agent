@@ -87,13 +87,28 @@ def main() -> None:
     weights = config.get("weights")
     category_map_value = _normalize_optional(config.get("category_map"))
     category_map_path = Path(category_map_value).expanduser().resolve() if category_map_value else None
+    answers_path_value = _normalize_optional(config.get("answers_path"))
+    answers_path = Path(answers_path_value).expanduser().resolve() if answers_path_value else None
+    answers_roots_value = config.get("answers_roots")
+    answers_roots: list[Path] = []
+    if answers_roots_value:
+        if isinstance(answers_roots_value, list):
+            answers_roots = [Path(str(item)).expanduser().resolve() for item in answers_roots_value if str(item).strip()]
+        else:
+            text = str(answers_roots_value).strip()
+            if text:
+                answers_roots = [Path(item).expanduser().resolve() for item in text.split(",") if item.strip()]
 
-    if not candidate_model:
-        raise ValueError("candidate_model must be set")
-    if not method:
-        raise ValueError("method must be set")
+    using_batch_roots = bool(answers_roots)
+    if not using_batch_roots:
+        if not candidate_model:
+            raise ValueError("candidate_model must be set")
+        if not method:
+            raise ValueError("method must be set")
     if not judge_model:
         judge_model = candidate_model
+    if not judge_model:
+        raise ValueError("judge_model must be set")
     if not judge_api_base:
         judge_api_base = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL") or ""
     if not judge_api_key:
@@ -104,6 +119,33 @@ def main() -> None:
         raise ValueError("judge_api_key must be set")
 
     api_url = _resolve_api_url(judge_api_base)
+
+    if answers_path and answers_roots:
+        raise ValueError("Use either answers_path or answers_roots, not both.")
+
+    if answers_roots:
+        from minisweagent.swe_qa_bench.score import score_multiple_answer_roots
+
+        score_multiple_answer_roots(
+            answers_roots=answers_roots,
+            dataset_root=dataset_root,
+            judge_model=judge_model,
+            api_url=api_url,
+            api_key=judge_api_key,
+            repos=repos,
+            max_workers=max_workers,
+            timeout=timeout,
+            pass_threshold=pass_threshold,
+            pass_metric=pass_metric,
+            weights=weights,
+            judge_rounds=judge_rounds,
+            judge_agg=judge_agg,
+            category_map_path=category_map_path,
+            resume=resume,
+            candidate_model_filter=candidate_model,
+            method_filter=method,
+        )
+        return
 
     score_dataset(
         dataset_root=dataset_root,
@@ -124,6 +166,7 @@ def main() -> None:
         judge_agg=judge_agg,
         category_map_path=category_map_path,
         resume=resume,
+        answers_path=answers_path,
     )
 
 

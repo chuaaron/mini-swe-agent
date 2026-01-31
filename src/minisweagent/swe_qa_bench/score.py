@@ -152,6 +152,85 @@ def _aggregate(values: list[int], mode: str) -> float:
     return float(sum(values)) / len(values)
 
 
+def _resolve_run_root(path: Path) -> Path:
+    if path.name == "answers":
+        return path.parent
+    if (path / "answers").exists():
+        return path
+    raise ValueError(f"answers_root must be a run root or answers dir: {path}")
+
+
+def _iter_answer_sets(run_root: Path) -> list[tuple[str, str]]:
+    answers_root = run_root / "answers"
+    if not answers_root.exists():
+        return []
+    pairs: list[tuple[str, str]] = []
+    for model_dir in sorted(answers_root.iterdir()):
+        if not model_dir.is_dir():
+            continue
+        for method_dir in sorted(model_dir.iterdir()):
+            if not method_dir.is_dir():
+                continue
+            if any(method_dir.glob("*.jsonl")):
+                pairs.append((model_dir.name, method_dir.name))
+    return pairs
+
+
+def score_multiple_answer_roots(
+    *,
+    answers_roots: list[Path],
+    dataset_root: Path,
+    judge_model: str,
+    api_url: str,
+    api_key: str,
+    repos: list[str] | None,
+    max_workers: int,
+    timeout: int,
+    pass_threshold: float,
+    pass_metric: str,
+    weights: dict[str, float] | None,
+    judge_rounds: int,
+    judge_agg: str,
+    category_map_path: Path | None,
+    resume: bool,
+    candidate_model_filter: str | None = None,
+    method_filter: str | None = None,
+) -> None:
+    for root in answers_roots:
+        run_root = _resolve_run_root(root)
+        run_id = run_root.name
+        output_root = run_root.parent
+        pairs = _iter_answer_sets(run_root)
+        if not pairs:
+            print(f"Skipping {run_root}: no answers found")
+            continue
+        for candidate_model, method in pairs:
+            if candidate_model_filter and candidate_model != candidate_model_filter:
+                continue
+            if method_filter and method != method_filter:
+                continue
+            score_dataset(
+                dataset_root=dataset_root,
+                candidate_model=candidate_model,
+                method=method,
+                judge_model=judge_model,
+                api_url=api_url,
+                api_key=api_key,
+                repos=repos,
+                max_workers=max_workers,
+                timeout=timeout,
+                pass_threshold=pass_threshold,
+                output_root=output_root,
+                run_id=run_id,
+                pass_metric=pass_metric,
+                weights=weights,
+                judge_rounds=judge_rounds,
+                judge_agg=judge_agg,
+                category_map_path=category_map_path,
+                resume=resume,
+            )
+
+
 def _call_judge(
     *,
     api_url: str,
@@ -420,6 +499,7 @@ def score_dataset(
     judge_agg: str = "median",
     category_map_path: Path | None = None,
     resume: bool = False,
+    answers_path: Path | None = None,
 ) -> None:
     reference_dir = dataset_root / "reference"
     base_root = output_root or dataset_root
@@ -438,6 +518,20 @@ def score_dataset(
     pass_metric = pass_metric if pass_metric in {"avg", "weighted"} else "weighted"
     judge_agg = judge_agg if judge_agg in {"mean", "median"} else "median"
     category_map = _load_category_map(category_map_path)
+
+    if answers_path:
+        answers_path = answers_path.expanduser().resolve()
+        if not answers_path.exists():
+            raise ValueError(f"answers_path not found: {answers_path}")
+        inferred_repo = answers_path.stem
+        if repos:
+            if len(repos) != 1:
+                raise ValueError("answers_path supports a single repo")
+            if repos[0] != inferred_repo:
+                raise ValueError(
+                    f"answers_path repo mismatch: {repos[0]} vs {inferred_repo}"
+                )
+        repos = [inferred_repo]
 
     scored_repos: list[str] = []
     total_scored = 0
@@ -471,7 +565,7 @@ def score_dataset(
                 bucket["score_sum"] += float(record.get("score_avg", 0.0))
                 bucket["weighted_sum"] += float(record.get("weighted_score", 0.0))
     for repo in _iter_repos(reference_dir, repos):
-        candidate_path = candidate_base / f"{repo}.jsonl"
+        candidate_path = answers_path if answers_path else candidate_base / f"{repo}.jsonl"
         reference_path = reference_dir / f"{repo}.jsonl"
         output_path = output_base / f"{repo}.jsonl"
 
@@ -541,6 +635,7 @@ def score_dataset(
             "benchmark": "swe_qa_bench",
             "candidate_model": candidate_model,
             "method": method,
+            "answers_path": str(answers_path) if answers_path else "",
             "judge_config": {
                 "model": judge_model,
                 "prompt_hash": prompt_hash,
@@ -583,6 +678,12 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=int(os.getenv("JUDGE_TIMEOUT", "60")))
     parser.add_argument("--repos", default="", help="Comma-separated repo list (optional)")
     parser.add_argument("--output-root", default=os.getenv("OUTPUT_ROOT"), help="Results root (default: dataset root)")
+    parser.add_argument("--answers-path", default=os.getenv("ANSWERS_PATH"), help="Direct answers file path")
+    parser.add_argument(
+        "--answers-roots",
+        default=os.getenv("ANSWERS_ROOTS", ""),
+        help="Comma-separated list of run roots or answers dirs for batch scoring",
+    )
     parser.add_argument("--pass-metric", default=os.getenv("PASS_METRIC", "weighted"), help="avg or weighted")
     parser.add_argument("--weights", default=os.getenv("SCORE_WEIGHTS", ""), help="JSON weights mapping")
     parser.add_argument("--judge-rounds", type=int, default=int(os.getenv("JUDGE_ROUNDS", "1")))
@@ -596,10 +697,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if not args.candidate_model:
-        raise SystemExit("candidate model must be set via --candidate-model or MODEL env var")
-    if not args.method:
-        raise SystemExit("method must be set via --method or METHOD env var")
+    answers_roots = (
+        [Path(item).expanduser().resolve() for item in args.answers_roots.split(",") if item.strip()]
+        if args.answers_roots
+        else []
+    )
+    using_batch_roots = bool(answers_roots)
+
+    if not using_batch_roots:
+        if not args.candidate_model:
+            raise SystemExit("candidate model must be set via --candidate-model or MODEL env var")
+        if not args.method:
+            raise SystemExit("method must be set via --method or METHOD env var")
 
     judge_model = args.judge_model or args.candidate_model
     if not judge_model:
@@ -620,6 +729,32 @@ def main() -> None:
             raise SystemExit("weights must be a JSON mapping")
     output_root = Path(args.output_root).expanduser().resolve() if args.output_root else None
     category_map_path = Path(args.category_map).expanduser().resolve() if args.category_map else None
+    answers_path = Path(args.answers_path).expanduser().resolve() if args.answers_path else None
+
+    if answers_path and answers_roots:
+        raise SystemExit("Use either --answers-path or --answers-roots, not both.")
+
+    if answers_roots:
+        score_multiple_answer_roots(
+            answers_roots=answers_roots,
+            dataset_root=Path(args.dataset_root).resolve(),
+            judge_model=judge_model,
+            api_url=api_url,
+            api_key=args.judge_api_key,
+            repos=repos,
+            max_workers=args.max_workers,
+            timeout=args.timeout,
+            pass_threshold=args.pass_threshold,
+            pass_metric=args.pass_metric,
+            weights=weights,
+            judge_rounds=args.judge_rounds,
+            judge_agg=args.judge_agg,
+            category_map_path=category_map_path,
+            resume=args.resume,
+            candidate_model_filter=args.candidate_model or None,
+            method_filter=args.method or None,
+        )
+        return
 
     score_dataset(
         dataset_root=Path(args.dataset_root).resolve(),
@@ -640,6 +775,7 @@ def main() -> None:
         judge_agg=args.judge_agg,
         category_map_path=category_map_path,
         resume=args.resume,
+        answers_path=answers_path,
     )
 
 
