@@ -1,0 +1,201 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to answer codebase questions.
+    Your response must contain exactly ONE bash code block with ONE command.
+    If you call a tool, the bash block must contain only a single "@tool ..." line.
+
+    Include a THOUGHT section before your command.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    ## Available Tools
+
+    ### @tool code_search --query "<desc>" [--topk N] [--filters F]
+    Semantic code search using embeddings.
+
+    You MUST start with code_search unless the question explicitly provides exact file paths.
+    Do NOT begin with bash exploration.
+    After getting results, use rg/cat to read code in the repo.
+
+    Examples:
+    - @tool code_search --query "request context initialization"
+    - @tool code_search --query "dataframe alignment" --topk 30
+    - @tool code_search --query "socket timeout handling" --filters "lang:python path:src/"
+
+    ### Bash commands
+    You can also use standard bash commands directly:
+    - rg: exact text search
+    - cat/nl/sed: read files
+    - find: locate files
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <task>
+    You are answering a question about the repository. Do NOT edit or create files.
+
+    Question:
+    {{task}}
+    </task>
+
+    <repository>
+    Repo: {{ repo }}
+    Working directory: {{ workdir }}
+    </repository>
+
+    <instructions>
+    ## Single-Action Protocol (Hard Rule)
+    - Your reply must contain exactly ONE THOUGHT section.
+    - Your reply must contain exactly ONE bash code block.
+    - That bash block must contain exactly ONE command.
+      If you need multiple actions, chain them with && or || in the same command.
+    - If you call a tool, the bash block must contain only a single "@tool ..." line.
+    - Do NOT output multiple bash code blocks.
+    - Stop immediately after the bash code block (no extra text).
+
+    ## Goal
+    Answer the question using evidence from the repository.
+
+    ## Rules
+    - Read-only work: do not modify files.
+    - MUST start with code_search unless the question provides exact file paths.
+    - Do NOT start with bash exploration before code_search.
+    - After code_search, use rg/cat/sed for targeted file reads.
+    - Do not run tests.
+    - File paths must be relative to the repo root (no leading slash).
+
+    ## Final output
+    When you are done, output ONLY a valid JSON object with this key:
+    - answer: string
+
+    Submit by running a single command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"answer":"..."}\n'
+    </instructions>
+  final_prompt_template: |
+    You have reached the maximum step limit. You must provide your final answer now.
+    Do NOT run any more commands or tools.
+
+    Output ONLY the final JSON payload with this key:
+    - answer: string
+
+    Submit by running exactly ONE command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"answer":"..."}\n'
+  action_observation_template: |
+    {% if output.type == "tool" -%}
+    <tool_result>
+    {{ output.output }}
+    </tool_result>
+    {%- else -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+    {%- endif %}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue a single command that prints:
+    MINI_SWE_AGENT_FINAL_OUTPUT
+    <json payload>
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    THOUGHT: Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  tool_format_error_template: |
+    Invalid tool command format: {{ command }}
+
+    Usage: @tool <tool_name> [--arg1 value1] [--arg2 value2]
+
+    Available tools:
+    {% for tool in available_tools -%}
+    - {{ tool.name }}: {{ tool.description }}
+    {% endfor %}
+
+    Please try again with the correct format.
+  tool_error_template: |
+    Tool execution failed: {{ tool_name }}
+
+    Error: {{ error }}
+
+    Please try:
+    1. Fix your command arguments
+    2. Use bash commands instead (rg, grep, cat, etc.)
+  timeout_template: |
+    The last command <command>{{action['action']}}</command> timed out and has been killed.
+    The output of the command was:
+    {% if output | length < 10000 -%}
+    <output>
+    {{output}}
+    </output>
+    {%- else -%}
+    <warning>Output was too long and has been truncated.</warning>
+    <output_head>
+    {{ output[:5000] }}
+    </output_head>
+    <elided_chars>{{ output | length - 10000 }} characters elided</elided_chars>
+    <output_tail>
+    {{ output[-5000:] }}
+    </output_tail>
+    {%- endif %}
+    Please try another command and make sure to avoid those requiring interactive input.
+  step_limit: 120
+  cost_limit: 3.
+
+environment:
+  environment_class: docker
+  repo_mount_mode: single
+  image: locbench-minisweagent:latest
+  cwd: "/"
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: 'off'
+
+run:
+  env_teardown_command: |
+    cd {{ workdir_q }} &&
+    git reset --hard &&
+    git clean -fd

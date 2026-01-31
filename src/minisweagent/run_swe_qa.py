@@ -15,6 +15,7 @@ from minisweagent.utils.log import logger
 
 
 _ALLOWED_MODES = {"bash", "tools"}
+_ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback"}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -42,6 +43,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--method", help="Override run.method")
     parser.add_argument("--agent-config", help="Override run.agent_config")
     parser.add_argument("--tool-config", help="Override run.tool_config")
+    parser.add_argument(
+        "--tools-prompt",
+        choices=sorted(_ALLOWED_TOOLS_PROMPTS),
+        help="Tools prompt variant (tools mode only)",
+    )
 
     return parser.parse_args()
 
@@ -51,6 +57,20 @@ def _normalize_optional(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_tools_prompt(value: Any) -> str:
+    text = _normalize_optional(value)
+    if not text:
+        return "neutral"
+    return text.lower()
+
+
+def _apply_tools_prompt_suffix(method: str, tools_prompt: str) -> str:
+    if tools_prompt in {"search_first", "search_fallback"}:
+        suffix = f"__{tools_prompt}"
+        return method if method.endswith(suffix) else f"{method}{suffix}"
+    return method
 
 
 def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -80,6 +100,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["run"]["agent_config"] = args.agent_config
     if args.tool_config:
         overrides["run"]["tool_config"] = args.tool_config
+    if args.tools_prompt is not None:
+        overrides["run"]["tools_prompt"] = args.tools_prompt
 
     if args.model_name:
         overrides["model"]["model_name"] = args.model_name
@@ -159,6 +181,7 @@ def _log_summary(config: dict[str, Any], *, mode: str, agent_config: Path, tool_
         "output_dir": run_cfg.get("output_dir"),
         "agent_config": str(agent_config),
         "tool_config": str(tool_config) if tool_config else "",
+        "tools_prompt": run_cfg.get("tools_prompt"),
     }
 
     logger.info("Effective SWE-QA-Bench config summary:")
@@ -214,9 +237,23 @@ def main() -> None:
     billing = config.get("billing")
     pricing = None
 
+    tools_prompt = _normalize_tools_prompt(run_cfg.get("tools_prompt"))
+    if mode == "tools" and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
+        raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
+
     root = project_root()
-    default_agent = root / "swe_qa_bench" / "config" / ("agent_tools.yaml" if mode == "tools" else "agent_bash.yaml")
-    agent_config = Path(str(run_cfg.get("agent_config") or default_agent)).expanduser().resolve()
+    if mode == "tools":
+        default_agent = root / "swe_qa_bench" / "config" / f"agent_tools_{tools_prompt}.yaml"
+    else:
+        default_agent = root / "swe_qa_bench" / "config" / "agent_bash.yaml"
+
+    agent_config_override = _normalize_optional(args.agent_config)
+    if agent_config_override:
+        agent_config = Path(agent_config_override).expanduser().resolve()
+    elif mode == "tools" and args.tools_prompt:
+        agent_config = default_agent
+    else:
+        agent_config = Path(str(run_cfg.get("agent_config") or default_agent)).expanduser().resolve()
     if not agent_config.exists():
         raise ValueError(f"Agent config not found: {agent_config}")
 
@@ -230,6 +267,8 @@ def main() -> None:
             raise ValueError("paths.indexes_root and paths.model_root must be set for tools mode")
         indexes_root = str(_resolve_path(indexes_root, "paths.indexes_root"))
         model_root = str(_resolve_path(model_root, "paths.model_root"))
+
+    effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
 
     _log_summary(config, mode=mode, agent_config=agent_config, tool_config=tool_config)
 
@@ -274,11 +313,12 @@ def main() -> None:
         environment_class=environment_class,
         image=image,
         output_model_name=output_model_name,
-        method=method,
+        method=effective_method,
         output_dir=output_dir,
         redo_existing=redo_existing,
         indexes_root=indexes_root,
         model_root=model_root,
+        tools_prompt=tools_prompt,
         pricing=pricing,
         billing=billing,
     )

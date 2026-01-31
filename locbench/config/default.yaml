@@ -3,6 +3,7 @@
 
 run:
   mode: bash
+  tools_prompt: neutral
   workers: 1
   slice: ""
   filter: ""

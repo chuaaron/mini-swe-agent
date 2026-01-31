@@ -14,6 +14,8 @@ import yaml
 from minisweagent import package_dir
 from minisweagent.swe_qa_bench.runners import bash_runner, tools_runner
 
+_ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback"}
+
 
 def _load_config(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -69,6 +71,20 @@ def _normalize_optional(value: Any) -> str | None:
     return text or None
 
 
+def _normalize_tools_prompt(value: Any) -> str:
+    text = _normalize_optional(value)
+    if not text:
+        return "neutral"
+    return text.lower()
+
+
+def _apply_tools_prompt_suffix(method: str, tools_prompt: str) -> str:
+    if tools_prompt in {"search_first", "search_fallback"}:
+        suffix = f"__{tools_prompt}"
+        return method if method.endswith(suffix) else f"{method}{suffix}"
+    return method
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run SWE-QA-Bench from a YAML config")
     parser.add_argument("--config", required=True, help="Path to run config YAML")
@@ -102,7 +118,12 @@ def main() -> None:
     if not output_model_name:
         raise ValueError("output_model_name must be set")
 
+    tools_prompt = _normalize_tools_prompt(config.get("tools_prompt"))
+    if mode == "tools" and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
+        raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
+
     method = _get_method(mode, config.get("method"))
+    effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
     output_dir = _normalize_optional(config.get("output_dir")) or ""
     image = _normalize_optional(config.get("image"))
     environment_class = _normalize_optional(config.get("environment_class"))
@@ -112,8 +133,13 @@ def main() -> None:
     billing = config.get("billing")
     pricing = None
 
-    agent_config = config.get("agent_config") or _default_agent_config(mode)
-    agent_config_path = Path(agent_config).expanduser().resolve()
+    agent_config_value = config.get("agent_config")
+    if agent_config_value:
+        agent_config_path = Path(agent_config_value).expanduser().resolve()
+    elif mode == "tools":
+        agent_config_path = _default_agent_config(mode).with_name(f"agent_tools_{tools_prompt}.yaml")
+    else:
+        agent_config_path = _default_agent_config(mode)
 
     if mode == "bash":
         runner = bash_runner.BashRunner(
@@ -158,11 +184,12 @@ def main() -> None:
         environment_class=environment_class,
         image=image,
         output_model_name=output_model_name,
-        method=method,
+        method=effective_method,
         output_dir=output_dir,
         redo_existing=redo_existing,
         indexes_root=None,
         model_root=None,
+        tools_prompt=tools_prompt,
         pricing=pricing,
         billing=billing,
     )

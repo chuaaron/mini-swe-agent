@@ -104,6 +104,7 @@ class ToolsRunner:
         model_root: str | None,
         keep_worktrees: bool,
         worktrees_mode: str,
+        tools_prompt: str,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -131,6 +132,7 @@ class ToolsRunner:
         self.model_root = model_root
         self.keep_worktrees = keep_worktrees
         self.worktrees_mode = worktrees_mode
+        self.tools_prompt = tools_prompt
         self.pricing = pricing
         self.billing = billing
 
@@ -160,6 +162,7 @@ class ToolsRunner:
             model_root=self.model_root,
             keep_worktrees=self.keep_worktrees,
             worktrees_mode=self.worktrees_mode,
+            tools_prompt=self.tools_prompt,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -388,6 +391,7 @@ def _process_instance(
     worktree_root: Path,
     worktrees_mode: str,
     keep_worktrees: bool,
+    tools_prompt: str,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
 ) -> None:
@@ -469,6 +473,7 @@ def _process_instance(
             stats=stats,
             repo_root=instance.get("repo_source_path") or instance.get("repo_path"),
         )
+        output_record["tools_prompt"] = tools_prompt
         output_record["exit_status"] = exit_status
         output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
         output_record["trace_tokens"] = billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0))
@@ -488,6 +493,7 @@ def _process_instance(
             "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
             "cost_usd": billing_stats.get("cost_usd", getattr(model, "cost", 0.0)),
             "correct": metrics.get("correct"),
+            "tools_prompt": tools_prompt,
         }
         for key, value in metrics.items():
             if key != "correct":
@@ -523,6 +529,7 @@ def run_tools(
     model_root: str | None,
     keep_worktrees: bool,
     worktrees_mode: str,
+    tools_prompt: str,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -630,6 +637,7 @@ def run_tools(
                     worktrees_root,
                     worktrees_mode,
                     keep_worktrees,
+                    tools_prompt,
                     instance_summaries,
                     summary_lock,
                 ): instance["instance_id"]
@@ -652,6 +660,9 @@ def run_tools(
             "model": model or config.get("model", {}).get("model_name"),
             "model_class": model_class or config.get("model", {}).get("model_class"),
             "method": method,
+            "effective_method": method,
+            "tools_prompt": tools_prompt,
+            "agent_config": str(config_path),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
         instance_summaries=instance_summaries,

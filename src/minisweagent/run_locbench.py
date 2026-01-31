@@ -16,6 +16,7 @@ from minisweagent.locbench.utils import validate_output_model_name
 from minisweagent.utils.log import logger
 
 _ALLOWED_MODES = {"bash", "tools", "ir"}
+_ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback"}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -50,6 +51,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--agent-config", help="Override run.agent_config")
     parser.add_argument("--tool-config", help="Override run.tool_config")
     parser.add_argument("--environment-class", help="Override run.environment_class")
+    parser.add_argument(
+        "--tools-prompt",
+        choices=sorted(_ALLOWED_TOOLS_PROMPTS),
+        help="Tools prompt variant (tools mode only)",
+    )
 
     parser.add_argument("--topk-blocks", type=int, help="IR: top blocks")
     parser.add_argument("--topk-files", type=int, help="IR: top files")
@@ -68,6 +74,20 @@ def _normalize_optional(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_tools_prompt(value: Any) -> str:
+    text = _normalize_optional(value)
+    if not text:
+        return "neutral"
+    return text.lower()
+
+
+def _apply_tools_prompt_suffix(method: str, tools_prompt: str) -> str:
+    if tools_prompt in {"search_first", "search_fallback"}:
+        suffix = f"__{tools_prompt}"
+        return method if method.endswith(suffix) else f"{method}{suffix}"
+    return method
 
 
 def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
@@ -107,6 +127,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["run"]["tool_config"] = args.tool_config
     if args.environment_class:
         overrides["run"]["environment_class"] = args.environment_class
+    if args.tools_prompt is not None:
+        overrides["run"]["tools_prompt"] = args.tools_prompt
 
     if args.topk_blocks is not None:
         overrides["run"]["topk_blocks"] = args.topk_blocks
@@ -251,6 +273,7 @@ def _log_summary(
         "output_dir": run_cfg.get("output_dir"),
         "agent_config": str(agent_config),
         "tool_config": str(tool_config) if tool_config else "",
+        "tools_prompt": run_cfg.get("tools_prompt"),
     }
 
     logger.info("Effective LocBench config summary:")
@@ -315,9 +338,23 @@ def main(argv: list[str] | None = None) -> None:
     billing = config.get("billing")
     pricing = None
 
+    tools_prompt = _normalize_tools_prompt(run_cfg.get("tools_prompt"))
+    if mode == "tools" and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
+        raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
+
     root = project_root()
-    default_agent = root / "locbench" / "config" / ("agent_tools.yaml" if mode == "tools" else "agent_bash.yaml")
-    agent_config = Path(str(run_cfg.get("agent_config") or default_agent)).expanduser().resolve()
+    if mode == "tools":
+        default_agent = root / "locbench" / "config" / f"agent_tools_{tools_prompt}.yaml"
+    else:
+        default_agent = root / "locbench" / "config" / "agent_bash.yaml"
+
+    agent_config_override = _normalize_optional(args.agent_config)
+    if agent_config_override:
+        agent_config = Path(agent_config_override).expanduser().resolve()
+    elif mode == "tools" and args.tools_prompt:
+        agent_config = default_agent
+    else:
+        agent_config = Path(str(run_cfg.get("agent_config") or default_agent)).expanduser().resolve()
     if not agent_config.exists():
         raise ValueError(f"Agent config not found: {agent_config}")
 
@@ -365,6 +402,8 @@ def main(argv: list[str] | None = None) -> None:
         runner.run()
         return
 
+    effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
+
     if mode == "tools":
         runner = runners.ToolsRunner(
             dataset_path=dataset_path,
@@ -384,13 +423,14 @@ def main(argv: list[str] | None = None) -> None:
             environment_class=environment_class,
             image=image,
             output_model_name=output_model_name,
-            method=method,
+            method=effective_method,
             output_dir=output_dir,
             redo_existing=redo_existing,
             indexes_root=indexes_root,
             model_root=model_root,
             keep_worktrees=keep_worktrees,
             worktrees_mode=worktrees_mode,
+            tools_prompt=tools_prompt,
             pricing=pricing,
             billing=billing,
         )

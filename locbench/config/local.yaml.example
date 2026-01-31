@@ -1,20 +1,32 @@
-# LocBench local config (ignored by git).
-# Copy to local.yaml and fill in your machine-specific paths/secrets.
+# LocBench local config (copy to local.yaml).
+# Keep this file minimal; defaults live in locbench/config/default.yaml.
+
+run:
+  mode: tools  # bash | tools | ir
+  tools_prompt: neutral  # tools only: neutral | search_first | search_fallback
+  method: ""  # optional; non-neutral tools_prompt auto-appends suffix
+  output_dir: ""  # optional; leave empty to use default timestamped output
 
 paths:
-  # Required: LocBench dataset JSONL
+  # Required for any run:
   dataset_root: /abs/path/to/Loc-Bench_V1_dataset.jsonl
-
-  # Required: local repo mirrors (locbench_repos)
   repos_root: /abs/path/to/locbench_repos
+  output_model_name: openai_deepseek-v3.2
 
-  # Optional: local indexes/models/output roots
-  # indexes_root: /abs/path/to/locbench/indexes
-  # model_root: /abs/path/to/locbench/models/CodeRankEmbed
+  # Required for tools/ir mode (can also rely on defaults if they are valid):
+  indexes_root: /abs/path/to/locbench/indexes
+  model_root: /abs/path/to/locbench/models/CodeRankEmbed
+
+  # Optional overrides:
   # output_root: /abs/path/to/locbench/results
   # worktrees_root: /abs/path/to/locbench/worktrees
-  # output_model_name: openai_deepseek-v3.2
+
+model:
+  # Optional: override default model selection
+  model_class: chatanywhere
+  model_name: deepseek-v3.2
 
 env:
+  # API keys / endpoints for your model provider
   OPENAI_API_KEY: sk-your-key
   OPENAI_API_BASE: https://api.chatanywhere.tech/v1/chat/completions

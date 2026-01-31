@@ -96,6 +96,7 @@ class ToolsRunner:
         redo_existing: bool,
         indexes_root: str | None,
         model_root: str | None,
+        tools_prompt: str,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -119,6 +120,7 @@ class ToolsRunner:
         self.redo_existing = redo_existing
         self.indexes_root = indexes_root
         self.model_root = model_root
+        self.tools_prompt = tools_prompt
         self.pricing = pricing
         self.billing = billing
 
@@ -144,6 +146,7 @@ class ToolsRunner:
             redo_existing=self.redo_existing,
             indexes_root=self.indexes_root,
             model_root=self.model_root,
+            tools_prompt=self.tools_prompt,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -310,6 +313,7 @@ def process_instance(
     output_model_name: str,
     method: str,
     repos_root: Path,
+    tools_prompt: str,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
 ) -> None:
@@ -391,6 +395,7 @@ def process_instance(
         "steps": getattr(model, "n_calls", 0) if model else 0,
         "trace_tokens": billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0)),
         "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
+        "tools_prompt": tools_prompt,
     }
     _append_answer_record(answer_path, record)
     logger.info("Answer appended to: %s", answer_path)
@@ -417,6 +422,7 @@ def process_instance(
         "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
         "cost_usd": billing_stats.get("cost_usd", getattr(model, "cost", 0.0)),
         "correct": None,
+        "tools_prompt": tools_prompt,
     }
     with summary_lock:
         summary_sink.append(summary_record)
@@ -445,6 +451,7 @@ def run_tools(
     redo_existing: bool,
     indexes_root: str | None,
     model_root: str | None,
+    tools_prompt: str,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -546,6 +553,7 @@ def run_tools(
                     output_model_name,
                     method,
                     repos_root,
+                    tools_prompt,
                     instance_summaries,
                     summary_lock,
                 ): instance["instance_id"]
@@ -561,6 +569,9 @@ def run_tools(
             "model": model or config.get("model", {}).get("model_name"),
             "model_class": model_class or config.get("model", {}).get("model_class"),
             "method": method,
+            "effective_method": method,
+            "tools_prompt": tools_prompt,
+            "agent_config": str(config_path),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
         instance_summaries=instance_summaries,
