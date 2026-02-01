@@ -156,7 +156,7 @@ def main() -> None:
     else:
         agent_config_path = _default_agent_config(mode)
 
-    run_root = output_root / run_id
+    run_root = output_root
     run_root.mkdir(parents=True, exist_ok=True)
 
     if mode == "bash":
@@ -176,6 +176,7 @@ def main() -> None:
             image=image,
             output_model_name=output_model_name,
             method=method,
+            run_id=run_id,
             output_dir=output_dir,
             redo_existing=redo_existing,
             pricing=pricing,
@@ -189,7 +190,7 @@ def main() -> None:
     runner = tools_runner.ToolsRunner(
         dataset_root=dataset_root,
         repos_root=repos_root,
-            output_root=run_root,
+        output_root=run_root,
         repos=[item for item in repos.split(",") if item] if repos else [],
         slice_spec=slice_spec,
         shuffle=shuffle,
@@ -203,6 +204,7 @@ def main() -> None:
         image=image,
         output_model_name=output_model_name,
         method=effective_method,
+        run_id=run_id,
         output_dir=output_dir,
         redo_existing=redo_existing,
         indexes_root=None,

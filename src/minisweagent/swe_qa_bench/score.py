@@ -152,27 +152,79 @@ def _aggregate(values: list[int], mode: str) -> float:
     return float(sum(values)) / len(values)
 
 
-def _resolve_run_root(path: Path) -> Path:
+def _resolve_answers_scope(path: Path) -> tuple[Path, Path, list[str]]:
+    path = path.expanduser().resolve()
+    if path.is_file():
+        raise ValueError(f"answers_root must be a directory, got file: {path}")
     if path.name == "answers":
-        return path.parent
+        return path.parent, path, []
     if (path / "answers").exists():
-        return path
-    raise ValueError(f"answers_root must be a run root or answers dir: {path}")
+        return path, path / "answers", []
+    parts = list(path.parts)
+    if "answers" in parts:
+        idx = len(parts) - 1 - parts[::-1].index("answers")
+        base_root = Path(*parts[:idx]) if idx > 0 else Path(path.anchor or "/")
+        answers_root = base_root / "answers"
+        if not answers_root.exists():
+            raise ValueError(f"answers root not found under: {base_root}")
+        scope_parts = parts[idx + 1 :]
+        return base_root, answers_root, scope_parts
+    raise ValueError(f"answers_root must be a results root or answers dir: {path}")
 
 
-def _iter_answer_sets(run_root: Path) -> list[tuple[str, str]]:
-    answers_root = run_root / "answers"
-    if not answers_root.exists():
+def _has_jsonl(dir_path: Path) -> bool:
+    return any(dir_path.glob("*.jsonl"))
+
+
+def _iter_answer_sets(answers_root: Path, scope_parts: list[str]) -> list[tuple[str, str, str]]:
+    pairs: list[tuple[str, str, str]] = []
+
+    def add_runs(model_dir: Path, method_dir: Path, run_dir: Path) -> None:
+        if _has_jsonl(run_dir):
+            pairs.append((model_dir.name, method_dir.name, run_dir.name))
+
+    if not scope_parts:
+        for model_dir in sorted(answers_root.iterdir()):
+            if not model_dir.is_dir():
+                continue
+            for method_dir in sorted(model_dir.iterdir()):
+                if not method_dir.is_dir():
+                    continue
+                for run_dir in sorted(method_dir.iterdir()):
+                    if run_dir.is_dir():
+                        add_runs(model_dir, method_dir, run_dir)
+        return pairs
+
+    if len(scope_parts) > 3:
+        raise ValueError(f"answers_root too deep (expected answers/<model>/<method>/<run_id>): {answers_root}")
+
+    model = scope_parts[0]
+    model_dir = answers_root / model
+    if not model_dir.exists():
         return []
-    pairs: list[tuple[str, str]] = []
-    for model_dir in sorted(answers_root.iterdir()):
-        if not model_dir.is_dir():
-            continue
+    if len(scope_parts) == 1:
         for method_dir in sorted(model_dir.iterdir()):
             if not method_dir.is_dir():
                 continue
-            if any(method_dir.glob("*.jsonl")):
-                pairs.append((model_dir.name, method_dir.name))
+            for run_dir in sorted(method_dir.iterdir()):
+                if run_dir.is_dir():
+                    add_runs(model_dir, method_dir, run_dir)
+        return pairs
+
+    method = scope_parts[1]
+    method_dir = model_dir / method
+    if not method_dir.exists():
+        return []
+    if len(scope_parts) == 2:
+        for run_dir in sorted(method_dir.iterdir()):
+            if run_dir.is_dir():
+                add_runs(model_dir, method_dir, run_dir)
+        return pairs
+
+    run_id = scope_parts[2]
+    run_dir = method_dir / run_id
+    if run_dir.is_dir():
+        add_runs(model_dir, method_dir, run_dir)
     return pairs
 
 
@@ -196,19 +248,22 @@ def score_multiple_answer_roots(
     candidate_model_filter: str | None = None,
     method_filter: str | None = None,
 ) -> None:
+    seen: set[tuple[Path, str, str, str]] = set()
     for root in answers_roots:
-        run_root = _resolve_run_root(root)
-        run_id = run_root.name
-        output_root = run_root.parent
-        pairs = _iter_answer_sets(run_root)
+        base_root, answers_root, scope_parts = _resolve_answers_scope(root)
+        pairs = _iter_answer_sets(answers_root, scope_parts)
         if not pairs:
-            print(f"Skipping {run_root}: no answers found")
+            print(f"Skipping {root}: no answers found")
             continue
-        for candidate_model, method in pairs:
+        for candidate_model, method, run_id in pairs:
             if candidate_model_filter and candidate_model != candidate_model_filter:
                 continue
             if method_filter and method != method_filter:
                 continue
+            key = (base_root, candidate_model, method, run_id)
+            if key in seen:
+                continue
+            seen.add(key)
             score_dataset(
                 dataset_root=dataset_root,
                 candidate_model=candidate_model,
@@ -220,7 +275,7 @@ def score_multiple_answer_roots(
                 max_workers=max_workers,
                 timeout=timeout,
                 pass_threshold=pass_threshold,
-                output_root=output_root,
+                output_root=base_root,
                 run_id=run_id,
                 pass_metric=pass_metric,
                 weights=weights,
@@ -312,7 +367,7 @@ def _format_float(value: float) -> str:
     return f"{value:.4f}"
 
 
-def _write_markdown_report(run_root: Path, summary: dict[str, Any]) -> None:
+def _write_markdown_report(output_dir: Path, summary: dict[str, Any]) -> None:
     meta = summary.get("meta", {})
     stats = summary.get("stats_overall", {})
     dims = summary.get("stats_dimensions", {})
@@ -379,7 +434,7 @@ def _write_markdown_report(run_root: Path, summary: dict[str, Any]) -> None:
         lines.append(f"weights: `{json.dumps(weights, ensure_ascii=False)}`")
     lines.append("")
 
-    report_path = run_root / "README.md"
+    report_path = output_dir / "README.md"
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -506,9 +561,8 @@ def score_dataset(
     if resume and not run_id:
         raise ValueError("resume requires run_id")
     run_id = run_id or time.strftime("%Y%m%d_%H%M%S")
-    run_root = base_root / run_id
-    candidate_base = run_root / "answers" / candidate_model / method
-    output_base = run_root / "scores" / candidate_model / method
+    candidate_base = base_root / "answers" / candidate_model / method / run_id
+    output_base = base_root / "scores" / candidate_model / method / run_id
 
     weights = _normalize_weights(weights)
     if pass_metric == "weighted_score":
@@ -661,7 +715,7 @@ def score_dataset(
     }
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary_payload, indent=2, ensure_ascii=False))
-    _write_markdown_report(run_root, summary_payload)
+    _write_markdown_report(output_base, summary_payload)
 
 
 def main() -> None:
@@ -682,7 +736,7 @@ def main() -> None:
     parser.add_argument(
         "--answers-roots",
         default=os.getenv("ANSWERS_ROOTS", ""),
-        help="Comma-separated list of run roots or answers dirs for batch scoring",
+        help="Comma-separated list of results roots, answers dirs, or answers/<model>/<method>/<run_id> dirs",
     )
     parser.add_argument("--pass-metric", default=os.getenv("PASS_METRIC", "weighted"), help="avg or weighted")
     parser.add_argument("--weights", default=os.getenv("SCORE_WEIGHTS", ""), help="JSON weights mapping")

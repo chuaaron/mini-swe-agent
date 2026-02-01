@@ -90,6 +90,7 @@ class BashRunner:
         image: str | None,
         output_model_name: str,
         method: str,
+        run_id: str,
         output_dir: str,
         redo_existing: bool,
         pricing: dict[str, Any] | None,
@@ -110,6 +111,7 @@ class BashRunner:
         self.image = image
         self.output_model_name = output_model_name
         self.method = method
+        self.run_id = run_id
         self.output_dir = output_dir
         self.redo_existing = redo_existing
         self.pricing = pricing
@@ -132,6 +134,7 @@ class BashRunner:
             image=self.image,
             output_model_name=self.output_model_name,
             method=self.method,
+            run_id=self.run_id,
             output_dir=self.output_dir,
             redo_existing=self.redo_existing,
             pricing=self.pricing,
@@ -211,13 +214,13 @@ def _filter_instances(
     return instances
 
 
-def _default_output_dir(output_root: Path, output_model_name: str, method: str) -> Path:
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    return output_root / "outputs" / output_model_name / method / timestamp
+def _default_output_dir(output_root: Path, output_model_name: str, method: str, run_id: str | None) -> Path:
+    stamp = run_id or time.strftime("%Y%m%d_%H%M%S")
+    return output_root / "outputs" / output_model_name / method / stamp
 
 
-def _get_answer_path(output_root: Path, output_model_name: str, method: str, repo: str) -> Path:
-    return output_root / "answers" / output_model_name / method / f"{repo}.jsonl"
+def _get_answer_path(output_root: Path, output_model_name: str, method: str, run_id: str, repo: str) -> Path:
+    return output_root / "answers" / output_model_name / method / run_id / f"{repo}.jsonl"
 
 
 def _get_environment(config: dict[str, Any], instance: dict[str, Any], repos_root: Path):
@@ -296,6 +299,7 @@ def process_instance(
     output_root: Path,
     output_model_name: str,
     method: str,
+    run_id: str,
     repos_root: Path,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
@@ -308,7 +312,7 @@ def process_instance(
 
     model = get_model(config=config.get("model", {}))
     question = instance["question"]
-    answer_path = _get_answer_path(output_root, output_model_name, method, instance["repo"])
+    answer_path = _get_answer_path(output_root, output_model_name, method, run_id, instance["repo"])
 
     progress_manager.on_instance_start(instance_id)
     progress_manager.update_instance_status(instance_id, "Starting container")
@@ -417,6 +421,7 @@ def run_bash(
     image: str | None,
     output_model_name: str,
     method: str,
+    run_id: str,
     output_dir: str,
     redo_existing: bool,
     pricing: dict[str, Any] | None,
@@ -446,7 +451,7 @@ def run_bash(
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
 
-    default_output_dir = _default_output_dir(output_root, output_model_name, method)
+    default_output_dir = _default_output_dir(output_root, output_model_name, method, run_id)
     if output_dir:
         output_dir_path = Path(output_dir)
         if not output_dir_path.is_absolute():
@@ -472,7 +477,7 @@ def run_bash(
 
     if not redo_existing:
         existing_by_repo = {
-            repo: _load_existing_questions(_get_answer_path(output_root, output_model_name, method, repo))
+            repo: _load_existing_questions(_get_answer_path(output_root, output_model_name, method, run_id, repo))
             for repo in repo_list
         }
         instances = [
@@ -515,6 +520,7 @@ def run_bash(
                     output_root,
                     output_model_name,
                     method,
+                    run_id,
                     repos_root,
                     instance_summaries,
                     summary_lock,
@@ -531,6 +537,7 @@ def run_bash(
             "model": model or config.get("model", {}).get("model_name"),
             "model_class": model_class or config.get("model", {}).get("model_class"),
             "method": method,
+            "run_id": run_id,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },
         instance_summaries=instance_summaries,

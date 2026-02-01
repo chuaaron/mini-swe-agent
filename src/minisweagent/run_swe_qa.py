@@ -295,7 +295,7 @@ def main() -> None:
     effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
     run_cfg["run_id"] = run_id
     run_cfg["resume"] = resume
-    run_root = output_root / run_id
+    run_root = output_root
     run_cfg["run_root"] = str(run_root)
     run_root.mkdir(parents=True, exist_ok=True)
 
@@ -318,6 +318,7 @@ def main() -> None:
             image=image,
             output_model_name=output_model_name,
             method=method,
+            run_id=run_id,
             output_dir=output_dir,
             redo_existing=redo_existing,
             pricing=pricing,
@@ -343,6 +344,7 @@ def main() -> None:
         image=image,
         output_model_name=output_model_name,
         method=effective_method,
+        run_id=run_id,
         output_dir=output_dir,
         redo_existing=redo_existing,
         indexes_root=indexes_root,

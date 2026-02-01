@@ -40,8 +40,8 @@ weights:
 category_map: /path/to/category_map.yaml
 answers_path: /abs/path/to/requests.jsonl
 answers_roots:
-  - /abs/path/to/swe_qa_bench/results/20260131_150000
-  - /abs/path/to/swe_qa_bench/results/20260131_170000
+  - /abs/path/to/swe_qa_bench/results/answers
+  - /abs/path/to/swe_qa_bench/results/answers/openai_deepseek-v3.2/miniswe_tools__search_first/20260131_150000
 judge_model: deepseek-v3.2
 judge_api_base: https://api.example.com/v1/chat/completions
 judge_api_key: sk-xxx
@@ -51,7 +51,7 @@ repos: ["requests"]
 ```
 
 说明：
-- `run_id` 用于定位本次实验的 answers/scores 目录；评分必须指定。
+- `run_id` 用于定位本次实验的 answers/scores 子目录（位于 method 下）；评分必须指定。
 - `candidate_model` + `method` 必须与 answers 输出路径一致。
 - `judge_api_base` 必须是完整的 `/v1/chat/completions` URL。
 - `repos` 为空时默认评分全部仓库。
@@ -61,23 +61,23 @@ repos: ["requests"]
 - `weights` 是 5 个维度的权重，可自定义。
 - `category_map` 可选，使用 `question_hash`(sha256[:8]) 进行分类统计。
 - `answers_path` 可选，直接指定 answers 文件路径（仅支持单个 repo）。
-- `answers_roots` 可选，批量评分多个 run 目录或 answers 目录（互斥于 `answers_path`）。
+- `answers_roots` 可选，批量评分 results 根目录、`answers/` 目录或 `answers/<model>/<method>/<run_id>` 目录（互斥于 `answers_path`）。
 - 当使用 `answers_roots` 时，`candidate_model`/`method` 可为空表示“全选”，也可填写作为过滤条件。
 
 ---
 
 ## 3. 输出路径
 
-评分输出写入（已 run_id 隔离）：
+评分输出写入（按 run_id 分目录）：
 
 ```
-mini-swe-agent/swe_qa_bench/results/<run_id>/scores/{MODEL}/{METHOD}/{repo}.jsonl
+mini-swe-agent/swe_qa_bench/results/scores/{MODEL}/{METHOD}/{RUN_ID}/{repo}.jsonl
 ```
 
 同时会生成：
 ```
-mini-swe-agent/swe_qa_bench/results/<run_id>/scores/{MODEL}/{METHOD}/run_summary.json
-mini-swe-agent/swe_qa_bench/results/<run_id>/README.md
+mini-swe-agent/swe_qa_bench/results/scores/{MODEL}/{METHOD}/{RUN_ID}/run_summary.json
+mini-swe-agent/swe_qa_bench/results/scores/{MODEL}/{METHOD}/{RUN_ID}/README.md
 ```
 
 ---
@@ -99,7 +99,7 @@ mini-swe-agent/swe_qa_bench/results/<run_id>/README.md
 
 2) **评分为空或跳过**
 - 检查 answers 路径是否存在：
-  `swe_qa_bench/results/<run_id>/answers/<model>/<method>/<repo>.jsonl`
+  `swe_qa_bench/results/answers/<model>/<method>/<run_id>/<repo>.jsonl`
 
 3) **单条快速评分**
 - 在 YAML 里设置 `repos: ["requests"]` 或 `repos: "requests"`。

@@ -71,8 +71,8 @@ PYTHONPATH=src python -m minisweagent.run_swe_qa \\
 ```
 
 说明：
-- `--redo-existing` 会把同一问题追加到 `answers/*.jsonl`，需要干净评分时先清理该文件。
-- 运行完成会打印 `Answer appended to: .../answers/<model>/<method>/<repo>.jsonl`。
+- `--redo-existing` 会把同一问题追加到 `answers/<model>/<method>/<run_id>/*.jsonl`，需要干净评分时先清理该目录。
+- 运行完成会打印 `Answer appended to: .../answers/<model>/<method>/<run_id>/<repo>.jsonl`。
 
 ### 2.2 Tools（bash + code_search）
 
@@ -115,14 +115,14 @@ run:
 
 ---
 
-## 4. 输出路径说明（run_id 隔离）
+## 4. 输出路径说明（按 run_id 分目录）
 
 - 轨迹与日志：
-  - `$MINISWE_ROOT/swe_qa_bench/results/<run_id>/outputs/<model>/<method>/<timestamp>/`
+  - `$MINISWE_ROOT/swe_qa_bench/results/outputs/<model>/<method>/<run_id>/`
 - 候选答案（不再写入数据集目录）：
-  - `$MINISWE_ROOT/swe_qa_bench/results/<run_id>/answers/<model>/<method>/<repo>.jsonl`
+  - `$MINISWE_ROOT/swe_qa_bench/results/answers/<model>/<method>/<run_id>/<repo>.jsonl`
 - 评分输出（不再写入数据集目录）：
-  - `$MINISWE_ROOT/swe_qa_bench/results/<run_id>/scores/<model>/<method>/<repo>.jsonl`
+  - `$MINISWE_ROOT/swe_qa_bench/results/scores/<model>/<method>/<run_id>/<repo>.jsonl`
 
 说明：
 - answers 里的每条记录包含 `stats` 字段（token/cost/api_calls 等）。
@@ -147,10 +147,10 @@ PYTHONPATH=src python -m minisweagent.swe_qa_bench.score_from_yaml \
 ## 6. 清理与维护
 
 ```bash
-rm -rf $MINISWE_ROOT/swe_qa_bench/results/<run_id>/outputs/*
+rm -rf $MINISWE_ROOT/swe_qa_bench/results/outputs/<model>/<method>/<run_id>/*
 rm -rf $MINISWE_ROOT/swe_qa_bench/worktrees/*
 ```
 
 注意：
-- 不建议删除 `swe_qa_bench/results/<run_id>/answers` 与 `swe_qa_bench/results/<run_id>/scores`，除非你明确要重跑该 run。
+- 不建议删除 `swe_qa_bench/results/answers/.../<run_id>` 与 `swe_qa_bench/results/scores/.../<run_id>`，除非你明确要重跑该 run。
 - tools 模式的索引通常较大，清理请谨慎：`$MINISWE_ROOT/swe_qa_bench/indexes/`。
