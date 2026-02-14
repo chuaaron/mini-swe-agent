@@ -1,0 +1,85 @@
+# LocBench 统一配置文件
+# 放在 locbench/ 文件夹中，所有路径相对于locbench根目录
+
+# ============ 基础路径配置 ============
+paths:
+  # LocBench根目录（自动推断为配置文件所在目录的父目录）
+  locbench_root: "."  # 相对于配置文件位置，或绝对路径
+
+  # Mini-SWE-Agent根目录
+  mini_swe_root: "./mini-swe-agent"
+
+  # 数据集路径
+  dataset: "./data/Loc-Bench_V1_dataset.jsonl"
+
+  # 代码仓库镜像路径
+  repos_root: "./repos/locbench_repos"
+
+# ============ 代码搜索相关 ============
+code_search:
+  # 本地模型路径
+  model_path: "./mini-swe-agent/locbench/models/CodeRankEmbed"
+
+  # 索引根目录
+  index_root: "./mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code"
+
+  # 设备设置 (cuda/cpu)
+  device: "cuda"
+
+  # 批处理大小
+  batch_size: 64
+
+# ============ 模型配置 ============
+model:
+  # 默认模型名称 (格式: provider/model-name)
+  name: "chatanywhere/gpt-3.5-turbo"
+
+# ============ Docker配置 ============
+docker:
+  # Docker镜像名称
+  image: "locbench-minisweagent:latest"
+
+  # 是否使用镜像加速器
+  use_mirror: true
+
+  # 镜像加速器地址 (阿里云)
+  mirror_url: "https://4z1qcyrk.mirror.aliyuncs.com"
+
+# ============ 运行配置 ============
+run:
+  # 默认并行数
+  workers: 1
+
+  # 是否覆盖已有结果
+  redo_existing: true
+
+  # 步骤限制
+  step_limit: 120
+
+  # 成本限制（美元）
+  cost_limit: 3.0
+
+  # 超时时间（秒）
+  timeout: 60
+
+# ============ 实验配置 ============
+experiment:
+  # 随机种子
+  seed: 42
+
+  # 默认测试实例数量
+  test_slice: "0:5"
+
+  # 输出目录
+  output_dir: "./mini-swe-agent/locbench/outputs"
+
+  # 结果目录
+  results_dir: "./mini-swe-agent/locbench/loc_output"
+
+# ============ 环境配置 ============
+environment:
+  # Python版本要求
+  python_version: "3.11"
+
+  # 是否启用离线模式
+  offline_mode: false
