@@ -15,7 +15,7 @@ from minisweagent.locbench.config_loader import load_config, project_root
 from minisweagent.locbench.utils import validate_output_model_name
 from minisweagent.utils.log import logger
 
-_ALLOWED_MODES = {"bash", "tools", "ir"}
+_ALLOWED_MODES = {"bash", "tools", "tools_radar", "ir"}
 _ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback"}
 
 
@@ -23,11 +23,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run LocBench with layered config")
     parser.add_argument("--config-dir", default="", help="Config directory (default: locbench/config)")
 
-    parser.add_argument("--mode", choices=sorted(_ALLOWED_MODES), help="Run mode: bash, tools, or ir")
+    parser.add_argument("--mode", choices=sorted(_ALLOWED_MODES), help="Run mode: bash, tools, tools_radar, or ir")
     parser.add_argument("--dataset-root", help="Override paths.dataset_root")
     parser.add_argument("--repos-root", help="Override paths.repos_root")
-    parser.add_argument("--indexes-root", help="Override paths.indexes_root (tools/ir)")
-    parser.add_argument("--model-root", help="Override paths.model_root (tools/ir)")
+    parser.add_argument("--indexes-root", help="Override paths.indexes_root (tools/tools_radar/ir)")
+    parser.add_argument("--model-root", help="Override paths.model_root (tools/tools_radar/ir)")
     parser.add_argument("--worktrees-root", help="Override paths.worktrees_root")
     parser.add_argument("--output-root", help="Override paths.output_root")
     parser.add_argument("--output-model-name", help="Override paths.output_model_name")
@@ -54,7 +54,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--tools-prompt",
         choices=sorted(_ALLOWED_TOOLS_PROMPTS),
-        help="Tools prompt variant (tools mode only)",
+        help="Tools prompt variant (tools/tools_radar modes)",
     )
 
     parser.add_argument("--topk-blocks", type=int, help="IR: top blocks")
@@ -174,6 +174,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
 def _default_method(mode: str, value: str | None) -> str:
     if value:
         return value
+    if mode == "tools_radar":
+        return "miniswe_tools_radar"
     if mode == "tools":
         return "miniswe_tools"
     if mode == "ir":
@@ -339,19 +341,21 @@ def main(argv: list[str] | None = None) -> None:
     pricing = None
 
     tools_prompt = _normalize_tools_prompt(run_cfg.get("tools_prompt"))
-    if mode == "tools" and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
+    if mode in {"tools", "tools_radar"} and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
         raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
 
     root = project_root()
     if mode == "tools":
         default_agent = root / "locbench" / "config" / f"agent_tools_{tools_prompt}.yaml"
+    elif mode == "tools_radar":
+        default_agent = root / "locbench" / "config" / f"agent_tools_radar_{tools_prompt}.yaml"
     else:
         default_agent = root / "locbench" / "config" / "agent_bash.yaml"
 
     agent_config_override = _normalize_optional(args.agent_config)
     if agent_config_override:
         agent_config = Path(agent_config_override).expanduser().resolve()
-    elif mode == "tools" and args.tools_prompt:
+    elif mode in {"tools", "tools_radar"} and args.tools_prompt:
         agent_config = default_agent
     else:
         agent_config = Path(str(run_cfg.get("agent_config") or default_agent)).expanduser().resolve()
@@ -359,13 +363,17 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError(f"Agent config not found: {agent_config}")
 
     tool_config = None
-    if mode in {"tools", "ir"}:
-        default_tool = root / "locbench" / "config" / "code_search.yaml"
+    if mode in {"tools", "tools_radar", "ir"}:
+        default_tool = (
+            root / "locbench" / "config" / "file_radar_search.yaml"
+            if mode == "tools_radar"
+            else root / "locbench" / "config" / "code_search.yaml"
+        )
         tool_config = Path(str(run_cfg.get("tool_config") or default_tool)).expanduser().resolve()
         if not tool_config.exists():
             raise ValueError(f"Tool config not found: {tool_config}")
         if not indexes_root or not model_root:
-            raise ValueError("paths.indexes_root and paths.model_root must be set for tools/ir mode")
+            raise ValueError("paths.indexes_root and paths.model_root must be set for tools/tools_radar/ir mode")
         indexes_root = str(_resolve_dir(indexes_root, "paths.indexes_root", create=True))
         model_root = str(_resolve_path(model_root, "paths.model_root"))
 
@@ -402,9 +410,9 @@ def main(argv: list[str] | None = None) -> None:
         runner.run()
         return
 
-    effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode == "tools" else method
+    effective_method = _apply_tools_prompt_suffix(method, tools_prompt) if mode in {"tools", "tools_radar"} else method
 
-    if mode == "tools":
+    if mode in {"tools", "tools_radar"}:
         runner = runners.ToolsRunner(
             dataset_path=dataset_path,
             repos_root=repos_root,
@@ -431,6 +439,8 @@ def main(argv: list[str] | None = None) -> None:
             keep_worktrees=keep_worktrees,
             worktrees_mode=worktrees_mode,
             tools_prompt=tools_prompt,
+            tool_backend="file_radar_search" if mode == "tools_radar" else "code_search",
+            enforce_tool_verification=mode == "tools_radar",
             pricing=pricing,
             billing=billing,
         )

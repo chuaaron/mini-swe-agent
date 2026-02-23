@@ -16,6 +16,7 @@ subcommands = [
     ("minisweagent.run.extra.github_issue", ["github-issue", "gh"], "Run on a GitHub issue"),
     ("minisweagent.run.extra.locbench", ["locbench"], "Evaluate on LocBench (localization)"),
     ("minisweagent.run.extra.locbench_tools", ["locbench-tools"], "Evaluate on LocBench with tools enabled"),
+    ("minisweagent.run.extra.locbench_tools", ["locbench-tools-radar"], "Evaluate on LocBench with radar tools"),
     ("minisweagent.run.extra.locbench_code_search", ["locbench-code-search"], "Evaluate LocBench with code_search only"),
     ("minisweagent.run.extra.swebench", ["swebench"], "Evaluate on SWE-bench (batch mode)"),
     ("minisweagent.run.extra.swebench_single", ["swebench-single"], "Evaluate on SWE-bench (single instance)"),
@@ -41,12 +42,13 @@ def main():
     if len(args) == 0 or len(args) == 1 and args[0] in ["-h", "--help"]:
         return Console().print(get_docstring())
 
-    if args[0] in ["locbench", "locbench-tools", "locbench-code-search"]:
+    if args[0] in ["locbench", "locbench-tools", "locbench-tools-radar", "locbench-code-search"]:
         from minisweagent.run_locbench import main as run_locbench_main
 
         mode_map = {
             "locbench": "bash",
             "locbench-tools": "tools",
+            "locbench-tools-radar": "tools_radar",
             "locbench-code-search": "ir",
         }
         run_locbench_main(["--mode", mode_map[args[0]], *args[1:]])

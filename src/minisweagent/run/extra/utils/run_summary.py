@@ -35,7 +35,7 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
 
     success_count = sum(1 for item in instance_summaries if item.get("exit_status") == "Submitted")
 
-    return {
+    stats = {
         "total_instances": len(instance_summaries),
         "success_count": success_count,
         "pass_rate": pass_rate,
@@ -50,6 +50,40 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
         "p90_billed_tokens": _percentile(billed_tokens, 90),
         "total_cost": sum(costs),
     }
+
+    has_radar_fields = any("radar_called" in item for item in instance_summaries)
+    if has_radar_fields:
+        radar_called_instances = [item for item in instance_summaries if bool(item.get("radar_called"))]
+        radar_called_count = len(radar_called_instances)
+        radar_verified_count = sum(
+            1 for item in radar_called_instances if bool(item.get("radar_verification_satisfied"))
+        )
+        blocked_submission_count = sum(int(item.get("blocked_submission_count", 0) or 0) for item in instance_summaries)
+
+        total_tool_calls = sum(int(item.get("radar_tool_calls", 0) or 0) for item in instance_summaries)
+        total_tool_output_chars = sum(int(item.get("radar_tool_output_chars", 0) or 0) for item in instance_summaries)
+        avg_tool_output_chars = (float(total_tool_output_chars) / total_tool_calls) if total_tool_calls else 0.0
+
+        premature_submit_instances = sum(
+            1 for item in radar_called_instances if int(item.get("blocked_submission_count", 0) or 0) > 0
+        )
+        premature_submit_rate = (
+            premature_submit_instances / radar_called_count if radar_called_count else None
+        )
+
+        stats.update(
+            {
+                "radar_called_count": radar_called_count,
+                "verification_compliance_rate": (
+                    radar_verified_count / radar_called_count if radar_called_count else None
+                ),
+                "blocked_submission_count": blocked_submission_count,
+                "avg_tool_output_chars": avg_tool_output_chars,
+                "premature_submit_rate": premature_submit_rate,
+            }
+        )
+
+    return stats
 
 
 def _build_exit_status_counts(instance_summaries: list[dict[str, Any]]) -> dict[str, int]:

@@ -1,0 +1,226 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to localize code.
+    Your response must contain exactly ONE bash code block with ONE command.
+
+    Include a THOUGHT section before your command.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    ## Available Tools
+
+    ### @tool file_radar_search --query "<desc>" [--topk-files N] [--topk-blocks M] [--filters F]
+    Semantic file-level radar search.
+    This tool returns candidate file paths and scores only. It never returns code snippets.
+
+    You MUST start with file_radar_search unless the task explicitly provides exact file paths.
+    Do NOT begin with bash exploration.
+    After radar results, use rg/cat/sed to inspect candidate files before final output.
+    Note: This is a special API call, not a shell binary. It cannot be piped or chained.
+
+    Examples:
+    - @tool file_radar_search --query "centroid computation"
+    - @tool file_radar_search --query "handle user authentication" --topk-files 20
+    - @tool file_radar_search --query "database connection pool" --filters "lang:python path:src/"
+
+    ### Bash commands
+    You can also use standard bash commands directly:
+    - rg: exact text search (Preferred over find)
+    - cat/nl: read files
+      WARNING: Never cat a file without checking size first.
+      Use head -n 50 file.py or sed -n '10,50p' file.py to read large files in chunks.
+      If a file is too large, output will be truncated and you will lose context.
+    - find: locate files
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <task>
+    You are doing code localization only. Do NOT edit or create files.
+
+    Problem statement:
+    {{task}}
+    </task>
+
+    <repository>
+    Repo slug: {{ repo_slug }}
+    Base commit: {{ base_commit }}
+    Working directory: {{ workdir }}
+    </repository>
+
+    <instructions>
+    ## Atomic Action Protocol (Critical)
+    - Your reply must contain exactly ONE THOUGHT section.
+    - Your reply must contain exactly ONE bash code block.
+    - Do NOT output multiple bash code blocks.
+    - Stop immediately after the bash code block (no extra text).
+    - You must choose exactly ONE mode per turn. Never mix modes.
+
+    1. Shell Mode
+    - Run standard bash commands (rg, find, cat, nl, sed).
+    - You may chain shell commands with && or | in the same command.
+    - DO NOT use @tool in this mode.
+
+    2. Tool Mode
+    - Call a provided tool (for example @tool file_radar_search).
+    - The bash block must contain one standalone @tool ... line.
+    - FORBIDDEN: do NOT pipe (|) tool output.
+    - FORBIDDEN: do NOT chain tools with &&, ||, or ;.
+    - FORBIDDEN: do NOT combine @tool with any shell command.
+    - FORBIDDEN: do NOT assign tool output to variables.
+
+    ## Goal
+    Identify the most relevant files and entities that should be edited to address the problem.
+
+    ## Rules
+    - Read-only work: do not modify files.
+    - MUST start with file_radar_search unless the task provides exact file paths.
+    - Do NOT start with bash exploration before file_radar_search.
+    - After file_radar_search, you MUST inspect at least one returned candidate file via bash before final output.
+    - Do not run tests.
+    - File paths must be relative to the repo root (no leading slash).
+    - Entity format: "path/to/file.py:entity_name" (function, class, or method).
+
+    ## Final output
+    When you are done, output ONLY a valid JSON object with this key:
+    - functions: list of objects, each with:
+      - function: function name (required)
+      - file_hint: file name or partial path hint (required unless function is globally unique)
+
+    Submit by running a single command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
+    </instructions>
+  final_prompt_template: |
+    You have reached the maximum step limit. You must provide your final result now.
+    Do NOT run any more commands or tools.
+
+    Output ONLY the final JSON payload with this key:
+    - functions: list of {"function","file_hint"}
+
+    Submit by running exactly ONE command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
+  action_observation_template: |
+    {% if output.type == "tool" -%}
+    <tool_result>
+    {{ output.output }}
+    </tool_result>
+    {%- else -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+    {%- endif %}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue a single command that prints:
+    MINI_SWE_AGENT_FINAL_OUTPUT
+    <json payload>
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    THOUGHT: Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  tool_format_error_template: |
+    Invalid tool command format: {{ command }}
+
+    Usage: @tool <tool_name> [--arg1 value1] [--arg2 value2]
+
+    Available tools:
+    {% for tool in available_tools -%}
+    - {{ tool.name }}: {{ tool.description }}
+    {% endfor %}
+
+    Please try again with the correct format.
+  tool_error_template: |
+    Tool execution failed: {{ tool_name }}
+
+    Error: {{ error }}
+
+    Please try:
+    1. Fix your command arguments
+    2. Use bash commands instead (rg, grep, cat, etc.)
+  timeout_template: |
+    The last command <command>{{action['action']}}</command> timed out and has been killed.
+    The output of the command was:
+    {% if output | length < 10000 -%}
+    <output>
+    {{output}}
+    </output>
+    {%- else -%}
+    <warning>Output was too long and has been truncated.</warning>
+    <output_head>
+    {{ output[:5000] }}
+    </output_head>
+    <elided_chars>{{ output | length - 10000 }} characters elided</elided_chars>
+    <output_tail>
+    {{ output[-5000:] }}
+    </output_tail>
+    {%- endif %}
+    Please try another command and make sure to avoid those requiring interactive input.
+  step_limit: 20
+  cost_limit: 3.
+
+environment:
+  environment_class: docker
+  repo_mount_mode: single
+  image: locbench-minisweagent:latest
+  cwd: "/"
+  timeout: 120
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+
+run:
+  env_startup_command: |
+    mkdir -p /work &&
+    rm -rf {{ workdir_q }} &&
+    git -c safe.directory=* clone --no-hardlinks {{ repo_mount_path_q }} {{ workdir_q }} &&
+    cd {{ workdir_q }} &&
+    git checkout -q {{ base_commit_q }}
+  env_teardown_command: |
+    cd {{ workdir_q }} &&
+    git reset --hard &&
+    git clean -fd

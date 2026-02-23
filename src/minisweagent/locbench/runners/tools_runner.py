@@ -21,7 +21,7 @@ import yaml
 from jinja2 import StrictUndefined, Template
 from rich.live import Live
 
-from minisweagent.agents.tool_agent import ToolAgent
+from minisweagent.agents.tool_agent import FormatError, Submitted, ToolAgent, ToolExecutionError, ToolFormatError
 from minisweagent.config import get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.environments.repo_mounts import build_repo_mount_args
@@ -46,7 +46,8 @@ from minisweagent.locbench.utils import (
     append_jsonl,
 )
 from minisweagent.tools.code_search import CodeSearchTool
-from minisweagent.tools.registry import ToolRegistry
+from minisweagent.tools.file_radar_search import FileRadarSearchTool
+from minisweagent.tools.registry import ToolRegistry, ToolRegistryError
 from minisweagent.utils.log import add_file_handler, logger
 
 _OUTPUT_FILE_LOCK = threading.Lock()
@@ -63,10 +64,27 @@ def _get_last_assistant_content(agent: ToolAgent | None) -> str:
 
 
 class ProgressTrackingAgent(ToolAgent):
-    def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
+    def __init__(
+        self,
+        *args,
+        progress_manager: RunBatchProgressManager,
+        instance_id: str = "",
+        enforce_tool_verification: bool = False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.progress_manager = progress_manager
         self.instance_id = instance_id
+        self.enforce_tool_verification = enforce_tool_verification
+
+        self.needs_verification = False
+        self.candidate_files: set[str] = set()
+        self.verified_files: set[str] = set()
+        self.verification_read_commands = {"rg", "grep", "sed", "cat", "nl", "head", "tail"}
+
+        self.radar_called_count = 0
+        self.radar_tool_output_chars = 0
+        self.blocked_submission_count = 0
 
     def step(self) -> dict:
         tokens = getattr(self.model, "total_tokens", 0)
@@ -74,6 +92,91 @@ class ProgressTrackingAgent(ToolAgent):
             self.instance_id, f"Step {self.model.n_calls + 1:3d} ({tokens} toks)"
         )
         return super().step()
+
+    def _is_read_command(self, command: str) -> bool:
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            parts = command.split()
+        if not parts:
+            return False
+        return any(part in self.verification_read_commands for part in parts)
+
+    def _mark_verification_from_command(self, command: str) -> None:
+        if not self.needs_verification or not self.candidate_files:
+            return
+        if not self._is_read_command(command):
+            return
+
+        lowered = command.lower()
+        for file_path in self.candidate_files:
+            base_name = Path(file_path).name
+            if file_path.lower() in lowered or base_name.lower() in lowered:
+                self.verified_files.add(file_path)
+        if self.verified_files:
+            self.needs_verification = False
+
+    def execute_tool(self, action: dict) -> dict:
+        try:
+            result = self.tool_registry.execute(action["raw"], context=self.extra_template_vars)
+        except ToolRegistryError as exc:
+            available = self.tool_registry.available_tools()
+            raise ToolFormatError(
+                self.render_template(
+                    self.config.tool_format_error_template,
+                    command=action["raw"],
+                    available_tools=available,
+                )
+            ) from exc
+        if not result.success:
+            raise ToolExecutionError(
+                self.render_template(
+                    self.config.tool_error_template,
+                    tool_name=action["raw"].split()[1] if action["raw"].split() else "unknown",
+                    error=result.error or result.output,
+                )
+            )
+
+        command = action.get("raw", "")
+        if command.startswith("@tool file_radar_search"):
+            self.radar_called_count += 1
+            self.radar_tool_output_chars += len(result.output or "")
+            candidate_files: set[str] = set()
+            for item in result.data.get("results", []) if isinstance(result.data, dict) else []:
+                path = item.get("path")
+                if isinstance(path, str) and path.strip():
+                    candidate_files.add(path.strip())
+            self.candidate_files = candidate_files
+            self.verified_files = set()
+            self.needs_verification = self.enforce_tool_verification and bool(candidate_files)
+
+        return {
+            "type": "tool",
+            "output": result.output,
+            "returncode": result.returncode,
+            "action": action["raw"],
+            "data": result.data,
+        }
+
+    def execute_bash(self, action: dict) -> dict:
+        output = super().execute_bash(action)
+        self._mark_verification_from_command(action.get("command", ""))
+        return output
+
+    def has_finished(self, output: dict[str, str]):
+        lines = output.get("output", "").lstrip().splitlines(keepends=True)
+        if not lines:
+            return
+        marker = lines[0].strip()
+        if marker not in {"MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}:
+            return
+        if self.enforce_tool_verification and self.needs_verification:
+            self.blocked_submission_count += 1
+            raise FormatError(
+                "Submission blocked: run at least one bash read command on a candidate file returned by "
+                "file_radar_search before final output."
+            )
+        raise Submitted("".join(lines[1:]))
 
 
 class ToolsRunner:
@@ -105,6 +208,8 @@ class ToolsRunner:
         keep_worktrees: bool,
         worktrees_mode: str,
         tools_prompt: str,
+        tool_backend: str,
+        enforce_tool_verification: bool,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -133,6 +238,8 @@ class ToolsRunner:
         self.keep_worktrees = keep_worktrees
         self.worktrees_mode = worktrees_mode
         self.tools_prompt = tools_prompt
+        self.tool_backend = tool_backend
+        self.enforce_tool_verification = enforce_tool_verification
         self.pricing = pricing
         self.billing = billing
 
@@ -163,6 +270,8 @@ class ToolsRunner:
             keep_worktrees=self.keep_worktrees,
             worktrees_mode=self.worktrees_mode,
             tools_prompt=self.tools_prompt,
+            tool_backend=self.tool_backend,
+            enforce_tool_verification=self.enforce_tool_verification,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -392,6 +501,8 @@ def _process_instance(
     worktrees_mode: str,
     keep_worktrees: bool,
     tools_prompt: str,
+    tool_backend: str,
+    enforce_tool_verification: bool,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
 ) -> None:
@@ -437,6 +548,7 @@ def _process_instance(
             tool_registry=tool_registry,
             progress_manager=progress_manager,
             instance_id=instance_id,
+            enforce_tool_verification=enforce_tool_verification,
             **config.get("agent", {}),
         )
         exit_status, result = agent.run(task, **instance)
@@ -466,6 +578,12 @@ def _process_instance(
             print_fct=logger.info,
         )
         billing_stats = model.get_billing_stats() if model and hasattr(model, "get_billing_stats") else {}
+        radar_called = getattr(agent, "radar_called_count", 0) if agent else 0
+        radar_tool_output_chars = getattr(agent, "radar_tool_output_chars", 0) if agent else 0
+        blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
+        radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
+        radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
+        radar_verification_satisfied = bool(not getattr(agent, "needs_verification", False)) if agent else False
         output_record = build_loc_output(
             result,
             instance_id,
@@ -478,6 +596,14 @@ def _process_instance(
         output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
         output_record["trace_tokens"] = billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0))
         output_record["billed_tokens"] = billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0))
+        if tool_backend == "file_radar_search":
+            output_record["radar_called"] = bool(radar_called)
+            output_record["radar_tool_calls"] = radar_called
+            output_record["radar_tool_output_chars"] = radar_tool_output_chars
+            output_record["blocked_submission_count"] = blocked_submission_count
+            output_record["radar_candidate_files"] = radar_candidate_files
+            output_record["radar_verified_files"] = radar_verified_files
+            output_record["radar_verification_satisfied"] = radar_verification_satisfied
         metrics = compute_locbench_metrics(
             bench_data.get(instance_id),
             output_record.get("found_files", []),
@@ -495,6 +621,12 @@ def _process_instance(
             "correct": metrics.get("correct"),
             "tools_prompt": tools_prompt,
         }
+        if tool_backend == "file_radar_search":
+            summary_record["radar_called"] = bool(radar_called)
+            summary_record["radar_tool_calls"] = radar_called
+            summary_record["radar_tool_output_chars"] = radar_tool_output_chars
+            summary_record["blocked_submission_count"] = blocked_submission_count
+            summary_record["radar_verification_satisfied"] = radar_verification_satisfied
         for key, value in metrics.items():
             if key != "correct":
                 summary_record[key] = value
@@ -530,6 +662,8 @@ def run_tools(
     keep_worktrees: bool,
     worktrees_mode: str,
     tools_prompt: str,
+    tool_backend: str,
+    enforce_tool_verification: bool,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -564,7 +698,12 @@ def run_tools(
         tool_config["index_root"] = str(indexes_root)
     if model_root:
         tool_config["embedding_model"] = str(model_root)
-    tool = CodeSearchTool(tool_config)
+    if tool_backend == "code_search":
+        tool = CodeSearchTool(tool_config)
+    elif tool_backend == "file_radar_search":
+        tool = FileRadarSearchTool(tool_config)
+    else:
+        raise ValueError(f"Unsupported tool backend: {tool_backend}")
     tool_registry = ToolRegistry()
     tool_registry.register(tool)
 
@@ -638,6 +777,8 @@ def run_tools(
                     worktrees_mode,
                     keep_worktrees,
                     tools_prompt,
+                    tool_backend,
+                    enforce_tool_verification,
                     instance_summaries,
                     summary_lock,
                 ): instance["instance_id"]
@@ -662,6 +803,8 @@ def run_tools(
             "method": method,
             "effective_method": method,
             "tools_prompt": tools_prompt,
+            "tool_backend": tool_backend,
+            "enforce_tool_verification": enforce_tool_verification,
             "agent_config": str(config_path),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },

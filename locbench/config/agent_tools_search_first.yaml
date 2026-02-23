@@ -2,7 +2,6 @@ agent:
   system_template: |
     You are a helpful assistant that can interact multiple times with a computer shell to localize code.
     Your response must contain exactly ONE bash code block with ONE command.
-    If you call a tool, the bash block must contain only a single "@tool ..." line.
 
     Include a THOUGHT section before your command.
     Format your response as shown in <format_example>.
@@ -23,6 +22,7 @@ agent:
     You MUST start with code_search unless the task explicitly provides exact file paths.
     Do NOT begin with bash exploration.
     After getting results, use rg/cat to read code in the repo.
+    Note: This is a special API call, not a shell binary. It cannot be piped or chained.
 
     Examples:
     - @tool code_search --query "centroid computation"
@@ -31,8 +31,11 @@ agent:
 
     ### Bash commands
     You can also use standard bash commands directly:
-    - rg: exact text search
-    - cat/nl/sed: read files
+    - rg: exact text search (Preferred over find)
+    - cat/nl: read files
+      WARNING: Never cat a file without checking size first.
+      Use head -n 50 file.py or sed -n '10,50p' file.py to read large files in chunks.
+      If a file is too large, output will be truncated and you will lose context.
     - find: locate files
 
     Failure to follow these rules will cause your response to be rejected.
@@ -51,14 +54,25 @@ agent:
     </repository>
 
     <instructions>
-    ## Single-Action Protocol (Hard Rule)
+    ## Atomic Action Protocol (Critical)
     - Your reply must contain exactly ONE THOUGHT section.
     - Your reply must contain exactly ONE bash code block.
-    - That bash block must contain exactly ONE command.
-      If you need multiple actions, chain them with && or || in the same command.
-    - If you call a tool, the bash block must contain only a single "@tool ..." line.
     - Do NOT output multiple bash code blocks.
     - Stop immediately after the bash code block (no extra text).
+    - You must choose exactly ONE mode per turn. Never mix modes.
+
+    1. Shell Mode
+    - Run standard bash commands (rg, find, cat, nl, sed).
+    - You may chain shell commands with && or | in the same command.
+    - DO NOT use @tool in this mode.
+
+    2. Tool Mode
+    - Call a provided tool (for example @tool code_search).
+    - The bash block must contain one standalone @tool ... line.
+    - FORBIDDEN: do NOT pipe (|) tool output.
+    - FORBIDDEN: do NOT chain tools with &&, ||, or ;.
+    - FORBIDDEN: do NOT combine @tool with any shell command.
+    - FORBIDDEN: do NOT assign tool output to variables.
 
     ## Goal
     Identify the most relevant files and entities that should be edited to address the problem.
