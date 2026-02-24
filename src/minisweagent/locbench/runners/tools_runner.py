@@ -205,6 +205,7 @@ class ToolsRunner:
         redo_existing: bool,
         indexes_root: str | None,
         model_root: str | None,
+        embedding_device: str | None,
         keep_worktrees: bool,
         worktrees_mode: str,
         tools_prompt: str,
@@ -235,6 +236,7 @@ class ToolsRunner:
         self.redo_existing = redo_existing
         self.indexes_root = indexes_root
         self.model_root = model_root
+        self.embedding_device = embedding_device
         self.keep_worktrees = keep_worktrees
         self.worktrees_mode = worktrees_mode
         self.tools_prompt = tools_prompt
@@ -267,6 +269,7 @@ class ToolsRunner:
             redo_existing=self.redo_existing,
             indexes_root=self.indexes_root,
             model_root=self.model_root,
+            embedding_device=self.embedding_device,
             keep_worktrees=self.keep_worktrees,
             worktrees_mode=self.worktrees_mode,
             tools_prompt=self.tools_prompt,
@@ -659,6 +662,7 @@ def run_tools(
     redo_existing: bool,
     indexes_root: str | None,
     model_root: str | None,
+    embedding_device: str | None,
     keep_worktrees: bool,
     worktrees_mode: str,
     tools_prompt: str,
@@ -698,6 +702,8 @@ def run_tools(
         tool_config["index_root"] = str(indexes_root)
     if model_root:
         tool_config["embedding_model"] = str(model_root)
+    if embedding_device:
+        tool_config["embedding_device"] = embedding_device
     if tool_backend == "code_search":
         tool = CodeSearchTool(tool_config)
     elif tool_backend == "file_radar_search":

@@ -372,18 +372,27 @@ class FileRadarSearchTool:
     def _get_or_build_index(self, repo_path: Path, repo_dir: str, commit: str) -> FileRadarIndex:
         embedder_id = sanitize_id(f"{self.config.embedding_provider}_{self.config.embedding_model}")
         index_dir = self.index_root / _INDEX_VERSION / repo_dir / commit[:8] / embedder_id
-        if index_dir in self._index_cache:
-            return self._index_cache[index_dir]
+        legacy_dir = self.index_root / _INDEX_VERSION / repo_dir
+        flat_dir = self.index_root / repo_dir
 
+        index_dirs = [index_dir, legacy_dir, flat_dir]
+        for candidate in index_dirs:
+            if candidate in self._index_cache:
+                return self._index_cache[candidate]
+
+        for candidate in index_dirs:
+            embeddings_path = candidate / "embeddings.pt"
+            metadata_path = candidate / "metadata.jsonl"
+            meta_path = candidate / "meta.json"
+            if embeddings_path.exists() and metadata_path.exists():
+                index = self._load_index(embeddings_path, metadata_path, meta_path, repo_dir, commit)
+                self._index_cache[candidate] = index
+                return index
+
+        index_dir.mkdir(parents=True, exist_ok=True)
         embeddings_path = index_dir / "embeddings.pt"
         metadata_path = index_dir / "metadata.jsonl"
         meta_path = index_dir / "meta.json"
-        if embeddings_path.exists() and metadata_path.exists():
-            index = self._load_index(embeddings_path, metadata_path, meta_path, repo_dir, commit)
-            self._index_cache[index_dir] = index
-            return index
-
-        index_dir.mkdir(parents=True, exist_ok=True)
         index = self._build_index(repo_path, repo_dir, commit, embeddings_path, metadata_path, meta_path)
         self._index_cache[index_dir] = index
         return index

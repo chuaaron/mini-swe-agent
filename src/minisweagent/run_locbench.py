@@ -436,6 +436,7 @@ def main(argv: list[str] | None = None) -> None:
             redo_existing=redo_existing,
             indexes_root=indexes_root,
             model_root=model_root,
+            embedding_device=(config.get("paths") or {}).get("embedding_device"),
             keep_worktrees=keep_worktrees,
             worktrees_mode=worktrees_mode,
             tools_prompt=tools_prompt,
