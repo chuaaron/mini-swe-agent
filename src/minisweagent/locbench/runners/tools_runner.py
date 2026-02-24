@@ -8,6 +8,7 @@ import concurrent.futures
 import copy
 import json
 import random
+import re
 import shlex
 import shutil
 import subprocess
@@ -54,6 +55,7 @@ from minisweagent.utils.log import add_file_handler, logger
 
 _OUTPUT_FILE_LOCK = threading.Lock()
 _WORKTREE_LOCK = threading.Lock()
+_PATCH_DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$", re.MULTILINE)
 
 
 def _get_last_assistant_content(agent: ToolAgent | None) -> str:
@@ -74,12 +76,16 @@ class ProgressTrackingAgent(ToolAgent):
         progress_manager: RunBatchProgressManager,
         instance_id: str = "",
         enforce_tool_verification: bool = False,
+        disallow_tools: bool = False,
+        oracle_files: list[str] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.progress_manager = progress_manager
         self.instance_id = instance_id
         self.enforce_tool_verification = enforce_tool_verification
+        self.disallow_tools = disallow_tools
+        self.oracle_files = sorted({item.strip() for item in (oracle_files or []) if str(item).strip()})
 
         self.needs_verification = False
         self.candidate_files: set[str] = set()
@@ -101,6 +107,10 @@ class ProgressTrackingAgent(ToolAgent):
         self.blocked_submission_count = 0
         self._verification_interception_streak = 0
         self._strict_recovery_mode = False
+
+        if self.oracle_files:
+            self.candidate_files = set(self.oracle_files)
+            self.needs_verification = self.enforce_tool_verification and bool(self.candidate_files)
 
     def _candidate_preview_lines(self, *, include_inspected: bool = False) -> str:
         candidates = sorted(self.candidate_files)
@@ -138,6 +148,17 @@ class ProgressTrackingAgent(ToolAgent):
             "Single allowed template:\n"
             f"`{self._strict_recovery_template()}`\n"
             "Do not call @tool. Do not submit without a read command."
+        )
+
+    def _tools_forbidden_message(self) -> str:
+        preview_lines = self._candidate_preview_lines()
+        return (
+            "SYSTEM_INTERCEPTION: Tools Disabled in Oracle-Sniper Mode.\n"
+            "This mode forbids all @tool calls.\n"
+            "This is not a JSON formatting error.\n"
+            "Use bash commands only (rg/cat/sed/nl/head/tail) on the provided Oracle files.\n"
+            "Oracle candidate files:\n"
+            f"{preview_lines}"
         )
 
     def _verification_interception_message(self) -> str:
@@ -225,6 +246,8 @@ class ProgressTrackingAgent(ToolAgent):
 
     def parse_action(self, response: dict) -> dict:
         action = super().parse_action(response)
+        if self.disallow_tools and action.get("type") == "tool":
+            raise FormatError(self._tools_forbidden_message())
         if self._strict_recovery_mode and not self._is_valid_strict_recovery_action(action):
             raise FormatError(self._verification_interception_message())
         return action
@@ -580,6 +603,7 @@ class ToolsRunner:
         tools_prompt: str,
         tool_backend: str,
         enforce_tool_verification: bool,
+        oracle_sniper_mode: bool,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -611,6 +635,7 @@ class ToolsRunner:
         self.tools_prompt = tools_prompt
         self.tool_backend = tool_backend
         self.enforce_tool_verification = enforce_tool_verification
+        self.oracle_sniper_mode = oracle_sniper_mode
         self.pricing = pricing
         self.billing = billing
 
@@ -644,6 +669,7 @@ class ToolsRunner:
             tools_prompt=self.tools_prompt,
             tool_backend=self.tool_backend,
             enforce_tool_verification=self.enforce_tool_verification,
+            oracle_sniper_mode=self.oracle_sniper_mode,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -816,6 +842,75 @@ def _append_loc_output(path: Path, record: dict[str, Any]) -> None:
         append_jsonl(path, record)
 
 
+def _normalize_oracle_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    return Path(normalized).as_posix()
+
+
+def _is_test_file(path: str) -> bool:
+    lowered = path.lower()
+    name = lowered.split("/")[-1]
+    return (
+        lowered.startswith("tests/")
+        or "/tests/" in lowered
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+    )
+
+
+def _extract_patch_files(patch_text: str) -> list[str]:
+    if not patch_text:
+        return []
+    paths: list[str] = []
+    for match in _PATCH_DIFF_RE.finditer(patch_text):
+        right = _normalize_oracle_path(match.group(2))
+        if not right or right == "dev/null":
+            continue
+        paths.append(right)
+    return paths
+
+
+def _extract_edit_function_files(edit_functions: Any) -> list[str]:
+    if not edit_functions:
+        return []
+    values = edit_functions if isinstance(edit_functions, list) else [edit_functions]
+    files: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if not text:
+            continue
+        path = text.split(":", 1)[0].strip()
+        if not path:
+            continue
+        files.append(_normalize_oracle_path(path))
+    return files
+
+
+def _extract_oracle_files(record: dict[str, Any]) -> tuple[list[str], bool]:
+    candidates = _extract_patch_files(str(record.get("patch") or ""))
+    candidates.extend(_extract_edit_function_files(record.get("edit_functions")))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        cleaned = _normalize_oracle_path(path)
+        if not cleaned or cleaned.startswith("/") or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+
+    filtered = [path for path in deduped if not _is_test_file(path)]
+    if filtered:
+        return filtered, False
+    return deduped, bool(deduped)
+
+
 def _build_instances(
     records: list[dict[str, Any]],
     repo_root: Path,
@@ -840,6 +935,7 @@ def _build_instances(
         base_commit = record.get("base_commit") or "HEAD"
         repo_mount_path = f"/repos/{repo_dir}"
         workdir = f"/work/{instance_id}"
+        oracle_files, oracle_fallback_to_tests = _extract_oracle_files(record)
 
         instance = {
             "instance_id": instance_id,
@@ -854,6 +950,9 @@ def _build_instances(
             "base_commit": base_commit,
             "base_commit_q": shlex.quote(base_commit),
             "problem_statement": record.get("problem_statement") or "",
+            "oracle_files": oracle_files,
+            "oracle_primary_file": oracle_files[0] if oracle_files else "",
+            "oracle_fallback_to_tests": oracle_fallback_to_tests,
         }
         instances.append(instance)
     return instances, missing_repos
@@ -875,6 +974,7 @@ def _process_instance(
     tools_prompt: str,
     tool_backend: str,
     enforce_tool_verification: bool,
+    oracle_sniper_mode: bool,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
 ) -> None:
@@ -921,6 +1021,8 @@ def _process_instance(
             progress_manager=progress_manager,
             instance_id=instance_id,
             enforce_tool_verification=enforce_tool_verification,
+            disallow_tools=oracle_sniper_mode,
+            oracle_files=list(instance.get("oracle_files") or []),
             **config.get("agent", {}),
         )
         exit_status, result = agent.run(task, **instance)
@@ -960,9 +1062,13 @@ def _process_instance(
         blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
-        radar_verification_satisfied: bool | None = None
-        if radar_called:
-            radar_verification_satisfied = bool(not getattr(agent, "needs_verification", False))
+        inspected_files = sorted(getattr(agent, "inspected_files", set())) if agent else []
+        oracle_files = list(instance.get("oracle_files") or [])
+        oracle_primary_file = str(instance.get("oracle_primary_file") or "")
+        oracle_file_provided = bool(oracle_files)
+        verification_satisfied: bool | None = None
+        if enforce_tool_verification and agent and (radar_called or (oracle_sniper_mode and oracle_file_provided)):
+            verification_satisfied = bool(not getattr(agent, "needs_verification", False))
         output_record = build_loc_output(
             result,
             instance_id,
@@ -982,7 +1088,17 @@ def _process_instance(
             output_record["blocked_submission_count"] = blocked_submission_count
             output_record["radar_candidate_files"] = radar_candidate_files
             output_record["radar_verified_files"] = radar_verified_files
-            output_record["radar_verification_satisfied"] = radar_verification_satisfied
+            output_record["inspected_files"] = inspected_files
+            output_record["radar_verification_satisfied"] = verification_satisfied
+            output_record["oracle_sniper_mode"] = oracle_sniper_mode
+            output_record["oracle_file_provided"] = oracle_file_provided
+            output_record["oracle_file_count"] = len(oracle_files)
+            output_record["oracle_primary_file"] = oracle_primary_file
+            output_record["oracle_files"] = oracle_files
+            output_record["oracle_fallback_to_tests"] = bool(instance.get("oracle_fallback_to_tests"))
+            output_record["oracle_verification_satisfied"] = (
+                verification_satisfied if oracle_sniper_mode and oracle_file_provided else None
+            )
         metrics = compute_locbench_metrics(
             bench_data.get(instance_id),
             output_record.get("found_files", []),
@@ -1005,7 +1121,15 @@ def _process_instance(
             summary_record["radar_tool_calls"] = radar_called
             summary_record["radar_tool_output_chars"] = radar_tool_output_chars
             summary_record["blocked_submission_count"] = blocked_submission_count
-            summary_record["radar_verification_satisfied"] = radar_verification_satisfied
+            summary_record["radar_verification_satisfied"] = verification_satisfied
+            summary_record["oracle_sniper_mode"] = oracle_sniper_mode
+            summary_record["oracle_file_provided"] = oracle_file_provided
+            summary_record["oracle_file_count"] = len(oracle_files)
+            summary_record["oracle_primary_file"] = oracle_primary_file
+            summary_record["oracle_fallback_to_tests"] = bool(instance.get("oracle_fallback_to_tests"))
+            summary_record["oracle_verification_satisfied"] = (
+                verification_satisfied if oracle_sniper_mode and oracle_file_provided else None
+            )
         for key, value in metrics.items():
             if key != "correct":
                 summary_record[key] = value
@@ -1044,6 +1168,7 @@ def run_tools(
     tools_prompt: str,
     tool_backend: str,
     enforce_tool_verification: bool,
+    oracle_sniper_mode: bool,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -1072,22 +1197,25 @@ def run_tools(
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
 
-    tool_config_path = get_config_path(tool_config_path)
-    tool_config = yaml.safe_load(tool_config_path.read_text())
-    if indexes_root:
-        tool_config["index_root"] = str(indexes_root)
-    if model_root:
-        tool_config["embedding_model"] = str(model_root)
-    if embedding_device:
-        tool_config["embedding_device"] = embedding_device
-    if tool_backend == "code_search":
-        tool = CodeSearchTool(tool_config)
-    elif tool_backend == "file_radar_search":
-        tool = FileRadarSearchTool(tool_config)
-    else:
-        raise ValueError(f"Unsupported tool backend: {tool_backend}")
     tool_registry = ToolRegistry()
-    tool_registry.register(tool)
+    if oracle_sniper_mode:
+        logger.info("Oracle-sniper mode enabled: tool registry is intentionally empty.")
+    else:
+        tool_config_path = get_config_path(tool_config_path)
+        tool_config = yaml.safe_load(tool_config_path.read_text())
+        if indexes_root:
+            tool_config["index_root"] = str(indexes_root)
+        if model_root:
+            tool_config["embedding_model"] = str(model_root)
+        if embedding_device:
+            tool_config["embedding_device"] = embedding_device
+        if tool_backend == "code_search":
+            tool = CodeSearchTool(tool_config)
+        elif tool_backend == "file_radar_search":
+            tool = FileRadarSearchTool(tool_config)
+        else:
+            raise ValueError(f"Unsupported tool backend: {tool_backend}")
+        tool_registry.register(tool)
 
     default_output_dir = _default_output_dir(output_model_name, method)
     output_dir_path = Path(output_dir) if output_dir else default_output_dir
@@ -1161,6 +1289,7 @@ def run_tools(
                     tools_prompt,
                     tool_backend,
                     enforce_tool_verification,
+                    oracle_sniper_mode,
                     instance_summaries,
                     summary_lock,
                 ): instance["instance_id"]
@@ -1187,6 +1316,7 @@ def run_tools(
             "tools_prompt": tools_prompt,
             "tool_backend": tool_backend,
             "enforce_tool_verification": enforce_tool_verification,
+            "oracle_sniper_mode": oracle_sniper_mode,
             "agent_config": str(config_path),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         },

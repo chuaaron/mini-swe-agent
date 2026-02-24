@@ -1,0 +1,200 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact multiple times with a computer shell to localize code.
+    Your response must contain exactly ONE bash code block with ONE command.
+
+    Include a THOUGHT section before your command.
+    Format your response as shown in <format_example>.
+
+    <format_example>
+    THOUGHT: Your reasoning and analysis here
+
+    ```bash
+    your_command_here
+    ```
+    </format_example>
+
+    ## Oracle-Sniper Mode
+    - Tool calls are disabled. Do NOT use @tool.
+    - Use bash commands only (rg, grep, sed, cat, nl, head, tail, find).
+    - You must inspect the provided Oracle file(s) before final submission.
+
+    Failure to follow these rules will cause your response to be rejected.
+  instance_template: |
+    <task>
+    You are doing code localization only. Do NOT edit or create files.
+
+    Problem statement:
+    {{task}}
+    </task>
+
+    <repository>
+    Repo slug: {{ repo_slug }}
+    Base commit: {{ base_commit }}
+    Working directory: {{ workdir }}
+    </repository>
+
+    <oracle_files>
+    The bug is officially confirmed to be in these file(s):
+    {% if oracle_files -%}
+    {% for path in oracle_files -%}
+    - {{ path }}
+    {% endfor -%}
+    {% else -%}
+    - <none provided>
+    {% endif -%}
+    Primary file: {{ oracle_primary_file if oracle_primary_file else "<none>" }}
+    </oracle_files>
+
+    <instructions>
+    ## Atomic Action Protocol (Critical)
+    - Your reply must contain exactly ONE THOUGHT section.
+    - Your reply must contain exactly ONE bash code block.
+    - Do NOT output multiple bash code blocks.
+    - Stop immediately after the bash code block (no extra text).
+
+    ## Allowed commands
+    - Bash only: rg, grep, sed, cat, nl, head, tail, find
+    - You may chain bash commands with && or | in one command.
+
+    ## Forbidden
+    - Do NOT use @tool.
+    - Do NOT run tests.
+    - Read-only work: do not modify files.
+
+    ## Goal
+    Identify the most relevant class/function entities to edit in the Oracle file(s).
+
+    ## Rules
+    - You MUST inspect at least one Oracle file via bash before final output.
+    - Final JSON file_hint values should refer to inspected files.
+    - File paths must be relative to the repo root (no leading slash).
+    - Entity format: "path/to/file.py:entity_name" (function, class, or method).
+
+    ## Final output
+    When you are done, output ONLY a valid JSON object with this key:
+    - functions: list of objects, each with:
+      - function: function name (required)
+      - file_hint: file name or partial path hint (required unless function is globally unique)
+
+    Submit by running a single command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
+    </instructions>
+  final_prompt_template: |
+    You have reached the maximum step limit. You must provide your final result now.
+    Do NOT run any more commands.
+
+    Output ONLY the final JSON payload with this key:
+    - functions: list of {"function","file_hint"}
+
+    Submit by running exactly ONE command that prints:
+    - line 1: MINI_SWE_AGENT_FINAL_OUTPUT
+    - line 2: the JSON payload
+
+    Example:
+    printf 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"my_func","file_hint":"path/to/file.py"}]}\n'
+  action_observation_template: |
+    {% if output.type == "tool" -%}
+    <tool_result>
+    {{ output.output }}
+    </tool_result>
+    {%- else -%}
+    <returncode>{{output.returncode}}</returncode>
+    {% if output.output | length < 10000 -%}
+    <output>
+    {{ output.output -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.output | length - 10000 -%}
+    <output_head>
+    {{ output.output[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.output[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+    {%- endif %}
+  format_error_template: |
+    Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions.
+    If you want to end the task, please issue a single command that prints:
+    MINI_SWE_AGENT_FINAL_OUTPUT
+    <json payload>
+    Else, please format your response exactly as follows:
+
+    <response_example>
+    THOUGHT: Here are some thoughts about why you want to perform the action.
+
+    ```bash
+    <action>
+    ```
+    </response_example>
+
+    Note: In rare cases, if you need to reference a similar format in your command, you might have
+    to proceed in two steps, first writing TRIPLEBACKTICKSBASH, then replacing them with ```bash.
+  tool_format_error_template: |
+    Tool calls are disabled in oracle_sniper mode.
+    Use bash commands only.
+  tool_error_template: |
+    Tool execution failed: {{ tool_name }}
+
+    Error: {{ error }}
+
+    Use bash commands instead (rg, grep, cat, sed, etc.).
+  timeout_template: |
+    The last command <command>{{action['action']}}</command> timed out and has been killed.
+    The output of the command was:
+    {% if output | length < 10000 -%}
+    <output>
+    {{output}}
+    </output>
+    {%- else -%}
+    <warning>Output was too long and has been truncated.</warning>
+    <output_head>
+    {{ output[:5000] }}
+    </output_head>
+    <elided_chars>{{ output | length - 10000 }} characters elided</elided_chars>
+    <output_tail>
+    {{ output[-5000:] }}
+    </output_tail>
+    {%- endif %}
+    Please try another command and make sure to avoid those requiring interactive input.
+  step_limit: 30
+  cost_limit: 3.
+
+environment:
+  environment_class: docker
+  repo_mount_mode: single
+  image: locbench-minisweagent:latest
+  cwd: "/"
+  timeout: 120
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+
+run:
+  env_startup_command: |
+    mkdir -p /work &&
+    rm -rf {{ workdir_q }} &&
+    git -c safe.directory=* clone --no-hardlinks {{ repo_mount_path_q }} {{ workdir_q }} &&
+    cd {{ workdir_q }} &&
+    git checkout -q {{ base_commit_q }}
+  env_teardown_command: |
+    cd {{ workdir_q }} &&
+    git reset --hard &&
+    git clean -fd

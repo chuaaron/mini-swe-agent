@@ -83,6 +83,52 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
             }
         )
 
+    has_oracle_fields = any(bool(item.get("oracle_sniper_mode")) for item in instance_summaries)
+    if has_oracle_fields:
+        oracle_instances = [item for item in instance_summaries if bool(item.get("oracle_sniper_mode"))]
+        oracle_instance_count = len(oracle_instances)
+        oracle_provided_instances = [item for item in oracle_instances if bool(item.get("oracle_file_provided"))]
+        oracle_file_provided_count = len(oracle_provided_instances)
+
+        oracle_verified_count = 0
+        for item in oracle_provided_instances:
+            verified = item.get("oracle_verification_satisfied")
+            if verified is None:
+                verified = item.get("radar_verification_satisfied")
+            if bool(verified):
+                oracle_verified_count += 1
+
+        oracle_blocked_submission_count = sum(
+            int(item.get("blocked_submission_count", 0) or 0) for item in oracle_instances
+        )
+        oracle_entity_hit_count = sum(1 for item in oracle_provided_instances if bool(item.get("entity_hit_any")))
+
+        oracle_success_instances = [item for item in oracle_instances if item.get("correct") is True]
+        if not oracle_success_instances and oracle_instances and all("correct" not in item for item in oracle_instances):
+            oracle_success_instances = [item for item in oracle_instances if item.get("exit_status") == "Submitted"]
+        oracle_success_steps = [int(item.get("steps", 0) or 0) for item in oracle_success_instances]
+
+        stats.update(
+            {
+                "oracle_instance_count": oracle_instance_count,
+                "oracle_file_provided_count": oracle_file_provided_count,
+                "oracle_file_provided_rate": (
+                    oracle_file_provided_count / oracle_instance_count if oracle_instance_count else None
+                ),
+                "oracle_verification_compliance_rate": (
+                    oracle_verified_count / oracle_file_provided_count if oracle_file_provided_count else None
+                ),
+                "entity_hit_rate_given_oracle_file": (
+                    oracle_entity_hit_count / oracle_file_provided_count if oracle_file_provided_count else None
+                ),
+                "oracle_blocked_submission_count": oracle_blocked_submission_count,
+                "steps_to_success_in_oracle_count": len(oracle_success_steps),
+                "steps_to_success_in_oracle_mean": _avg(oracle_success_steps),
+                "steps_to_success_in_oracle_p50": _percentile(oracle_success_steps, 50),
+                "steps_to_success_in_oracle_p90": _percentile(oracle_success_steps, 90),
+            }
+        )
+
     return stats
 
 

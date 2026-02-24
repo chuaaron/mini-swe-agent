@@ -16,7 +16,7 @@ from minisweagent.locbench.utils import validate_output_model_name
 from minisweagent.utils.log import logger
 
 _ALLOWED_MODES = {"bash", "tools", "tools_radar", "ir"}
-_ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback"}
+_ALLOWED_TOOLS_PROMPTS = {"neutral", "search_first", "search_fallback", "oracle_sniper"}
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -84,7 +84,7 @@ def _normalize_tools_prompt(value: Any) -> str:
 
 
 def _apply_tools_prompt_suffix(method: str, tools_prompt: str) -> str:
-    if tools_prompt in {"search_first", "search_fallback"}:
+    if tools_prompt in {"search_first", "search_fallback", "oracle_sniper"}:
         suffix = f"__{tools_prompt}"
         return method if method.endswith(suffix) else f"{method}{suffix}"
     return method
@@ -343,6 +343,7 @@ def main(argv: list[str] | None = None) -> None:
     tools_prompt = _normalize_tools_prompt(run_cfg.get("tools_prompt"))
     if mode in {"tools", "tools_radar"} and tools_prompt not in _ALLOWED_TOOLS_PROMPTS:
         raise ValueError(f"Invalid tools_prompt: {tools_prompt}")
+    oracle_sniper_mode = mode == "tools_radar" and tools_prompt == "oracle_sniper"
 
     root = project_root()
     if mode == "tools":
@@ -372,10 +373,14 @@ def main(argv: list[str] | None = None) -> None:
         tool_config = Path(str(run_cfg.get("tool_config") or default_tool)).expanduser().resolve()
         if not tool_config.exists():
             raise ValueError(f"Tool config not found: {tool_config}")
-        if not indexes_root or not model_root:
-            raise ValueError("paths.indexes_root and paths.model_root must be set for tools/tools_radar/ir mode")
-        indexes_root = str(_resolve_dir(indexes_root, "paths.indexes_root", create=True))
-        model_root = str(_resolve_path(model_root, "paths.model_root"))
+        if mode == "tools_radar" and oracle_sniper_mode:
+            indexes_root = str(_resolve_dir(indexes_root, "paths.indexes_root", create=True)) if indexes_root else None
+            model_root = str(_resolve_path(model_root, "paths.model_root")) if model_root else None
+        else:
+            if not indexes_root or not model_root:
+                raise ValueError("paths.indexes_root and paths.model_root must be set for tools/tools_radar/ir mode")
+            indexes_root = str(_resolve_dir(indexes_root, "paths.indexes_root", create=True))
+            model_root = str(_resolve_path(model_root, "paths.model_root"))
 
     run_cfg["graph_index_dir"] = _normalize_graph_index_dir(run_cfg.get("graph_index_dir", ""))
 
@@ -442,6 +447,7 @@ def main(argv: list[str] | None = None) -> None:
             tools_prompt=tools_prompt,
             tool_backend="file_radar_search" if mode == "tools_radar" else "code_search",
             enforce_tool_verification=mode == "tools_radar",
+            oracle_sniper_mode=oracle_sniper_mode,
             pricing=pricing,
             billing=billing,
         )
