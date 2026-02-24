@@ -81,10 +81,28 @@ class ProgressTrackingAgent(ToolAgent):
         self.candidate_files: set[str] = set()
         self.verified_files: set[str] = set()
         self.verification_read_commands = {"rg", "grep", "sed", "cat", "nl", "head", "tail"}
+        self._control_tokens = {"&&", "||", ";", "|"}
 
         self.radar_called_count = 0
         self.radar_tool_output_chars = 0
         self.blocked_submission_count = 0
+
+    def _verification_interception_message(self) -> str:
+        candidates = sorted(self.candidate_files)
+        preview = candidates[:5]
+        preview_lines = "\n".join(f"- {path}" for path in preview) if preview else "- <none recorded>"
+        if len(candidates) > len(preview):
+            preview_lines += f"\n- ... ({len(candidates) - len(preview)} more)"
+        return (
+            "SYSTEM_INTERCEPTION: Verification Required.\n"
+            "You invoked file_radar_search, but have not inspected any returned candidate file with bash.\n"
+            "This is not a JSON formatting error.\n"
+            "Before submitting final output, run at least one successful bash read command on a candidate file.\n"
+            "Allowed commands: rg, grep, sed, cat, nl, head, tail.\n"
+            "Examples: `rg -n \"token\" path/to/candidate.py` or `sed -n '1,80p' path/to/candidate.py`.\n"
+            "Candidate files from radar:\n"
+            f"{preview_lines}"
+        )
 
     def step(self) -> dict:
         tokens = getattr(self.model, "total_tokens", 0)
@@ -102,17 +120,61 @@ class ProgressTrackingAgent(ToolAgent):
             return False
         return any(part in self.verification_read_commands for part in parts)
 
-    def _mark_verification_from_command(self, command: str) -> None:
+    def _mark_verification_from_command(self, command: str, output: dict[str, Any]) -> None:
         if not self.needs_verification or not self.candidate_files:
+            return
+        return_code = output.get("returncode", None)
+        if return_code is None:
+            return
+        if int(return_code) != 0:
             return
         if not self._is_read_command(command):
             return
 
-        lowered = command.lower()
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return
+
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for token in tokens:
+            if token in self._control_tokens:
+                if current:
+                    segments.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(current)
+
+        basename_counts: dict[str, int] = {}
         for file_path in self.candidate_files:
-            base_name = Path(file_path).name
-            if file_path.lower() in lowered or base_name.lower() in lowered:
-                self.verified_files.add(file_path)
+            name = Path(file_path).name
+            if name:
+                basename_counts[name] = basename_counts.get(name, 0) + 1
+
+        workdir = str(self.extra_template_vars.get("workdir") or "").rstrip("/")
+        for segment in segments:
+            if not segment:
+                continue
+            cmd_name = Path(segment[0]).name
+            if cmd_name not in self.verification_read_commands:
+                continue
+            segment_tokens = {token.strip() for token in segment}
+            for file_path in self.candidate_files:
+                rel = file_path.strip()
+                if not rel:
+                    continue
+                candidate_tokens = {rel, f"./{rel}"}
+                if workdir:
+                    candidate_tokens.add(f"{workdir}/{rel}")
+                basename = Path(rel).name
+                if basename and basename_counts.get(basename, 0) == 1:
+                    candidate_tokens.add(basename)
+                if candidate_tokens & segment_tokens:
+                    self.verified_files.add(file_path)
+
         if self.verified_files:
             self.needs_verification = False
 
@@ -160,7 +222,7 @@ class ProgressTrackingAgent(ToolAgent):
 
     def execute_bash(self, action: dict) -> dict:
         output = super().execute_bash(action)
-        self._mark_verification_from_command(action.get("command", ""))
+        self._mark_verification_from_command(action.get("command", ""), output)
         return output
 
     def has_finished(self, output: dict[str, str]):
@@ -172,10 +234,7 @@ class ProgressTrackingAgent(ToolAgent):
             return
         if self.enforce_tool_verification and self.needs_verification:
             self.blocked_submission_count += 1
-            raise FormatError(
-                "Submission blocked: run at least one bash read command on a candidate file returned by "
-                "file_radar_search before final output."
-            )
+            raise FormatError(self._verification_interception_message())
         raise Submitted("".join(lines[1:]))
 
 
@@ -560,6 +619,11 @@ def _process_instance(
             if fallback_text:
                 payload, raw = extract_json_payload(fallback_text)
                 result = raw if payload is not None and raw else build_fallback_loc_result(fallback_text)
+            # Guardrail: prevent step/cost-limit fallback from bypassing radar verification.
+            if enforce_tool_verification and agent and getattr(agent, "needs_verification", False):
+                agent.blocked_submission_count += 1
+                exit_status = "VerificationRequired"
+                result = build_fallback_loc_result("")
         stats = build_answer_stats(model)
     except Exception as exc:
         logger.error("Error processing instance %s: %s", instance_id, exc, exc_info=True)
@@ -586,7 +650,9 @@ def _process_instance(
         blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
-        radar_verification_satisfied = bool(not getattr(agent, "needs_verification", False)) if agent else False
+        radar_verification_satisfied: bool | None = None
+        if radar_called:
+            radar_verification_satisfied = bool(not getattr(agent, "needs_verification", False))
         output_record = build_loc_output(
             result,
             instance_id,
