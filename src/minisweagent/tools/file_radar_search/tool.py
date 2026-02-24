@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -263,7 +264,7 @@ class FileRadarSearchTool:
         self.index_root = Path(os.path.expanduser(self.config.index_root)).resolve()
         self.chunker = SlidingChunker(self.config.chunk_size, self.config.overlap)
         self.embedder = self._build_embedder()
-        self._index_cache: dict[Path, FileRadarIndex] = {}
+        self._index_cache: dict[tuple[Path, str], FileRadarIndex] = {}
         self._lock = threading.Lock()
 
     def _build_embedder(self):
@@ -283,14 +284,25 @@ class FileRadarSearchTool:
             with self._lock:
                 parsed = FileRadarSearchArgs.from_raw(args)
                 repo_path = Path(context["repo_path"])
-                repo_dir = context["repo_dir"]
-                base_commit = context.get("base_commit", "HEAD")
+                repo_dir = str(context.get("repo_dir") or "")
+                repo_slug = str(context.get("repo_slug") or repo_dir)
+                base_commit = str(context.get("base_commit", "HEAD"))
+                repo_fingerprint = self._repo_fingerprint(repo_path)
 
-                index = self._get_or_build_index(repo_path, repo_dir, base_commit)
+                index = self._get_or_build_index(
+                    repo_path=repo_path,
+                    repo_dir=repo_dir,
+                    repo_slug=repo_slug,
+                    commit=base_commit,
+                    repo_fingerprint=repo_fingerprint,
+                )
                 query_vec = self.embedder.embed([parsed.query])[0]
                 filters = parse_filters(parsed.filters)
                 blocks = index.search_blocks(query_vec, topk=parsed.topk_blocks, filters=filters)
-                structured = self._rank_files(blocks, repo_path, repo_dir)[: parsed.topk_files]
+                ranked = self._rank_files(blocks, repo_path, repo_dir)
+                repo_root = repo_path.resolve()
+                existing_only = [item for item in ranked if self._candidate_exists(repo_root, item["path"])]
+                structured = existing_only[: parsed.topk_files]
                 formatted = self._format_results(parsed.query, structured)
 
                 data = {
@@ -298,8 +310,11 @@ class FileRadarSearchTool:
                     "topk_files": parsed.topk_files,
                     "topk_blocks": parsed.topk_blocks,
                     "returned": len(structured),
+                    "returned_before_exists_filter": len(ranked),
                     "results": structured,
                     "metadata": index.meta,
+                    "repo_slug": repo_slug,
+                    "base_commit": base_commit,
                 }
                 return ToolResult(success=True, data=data, output=formatted, returncode=0)
         except ValueError:
@@ -369,39 +384,132 @@ class FileRadarSearchTool:
             )
         return "\n".join(lines).strip()
 
-    def _get_or_build_index(self, repo_path: Path, repo_dir: str, commit: str) -> FileRadarIndex:
+    def _candidate_exists(self, repo_root: Path, relative_path: str) -> bool:
+        if not relative_path:
+            return False
+        candidate = (repo_root / relative_path).resolve()
+        try:
+            candidate.relative_to(repo_root)
+        except ValueError:
+            return False
+        return candidate.is_file()
+
+    def _repo_fingerprint(self, repo_path: Path) -> str:
+        resolved = str(repo_path.resolve())
+        return hashlib.sha1(resolved.encode("utf-8")).hexdigest()
+
+    def _load_meta(self, meta_path: Path) -> dict[str, Any]:
+        if not meta_path.exists():
+            return {}
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _is_meta_compatible(
+        self,
+        meta: dict[str, Any],
+        *,
+        repo_dir: str,
+        repo_slug: str,
+        commit: str,
+        repo_fingerprint: str,
+    ) -> bool:
+        if not meta:
+            return False
+        if str(meta.get("index_version") or "") != _INDEX_VERSION:
+            return False
+        if str(meta.get("repo_dir") or "") != repo_dir:
+            return False
+        if str(meta.get("repo_slug") or "") != repo_slug:
+            return False
+        if str(meta.get("repo_fingerprint") or "") != repo_fingerprint:
+            return False
+        base_commit = str(meta.get("base_commit") or "")
+        if not base_commit:
+            return False
+        if base_commit != commit:
+            return False
+        if str(meta.get("embedding_provider") or "") != self.config.embedding_provider:
+            return False
+        if str(meta.get("embedding_model") or "") != self.config.embedding_model:
+            return False
+        if str(meta.get("chunker") or "") != self.config.chunker:
+            return False
+        try:
+            chunk_size = int(meta.get("chunk_size"))
+            overlap = int(meta.get("overlap"))
+        except (TypeError, ValueError):
+            return False
+        if chunk_size != self.config.chunk_size or overlap != self.config.overlap:
+            return False
+        if str(meta.get("aggregation") or "") != self.config.aggregation:
+            return False
+        return True
+
+    def _get_or_build_index(
+        self,
+        *,
+        repo_path: Path,
+        repo_dir: str,
+        repo_slug: str,
+        commit: str,
+        repo_fingerprint: str,
+    ) -> FileRadarIndex:
         embedder_id = sanitize_id(f"{self.config.embedding_provider}_{self.config.embedding_model}")
-        index_dir = self.index_root / _INDEX_VERSION / repo_dir / commit[:8] / embedder_id
-        legacy_dir = self.index_root / _INDEX_VERSION / repo_dir
-        flat_dir = self.index_root / repo_dir
+        safe_repo = sanitize_id(repo_slug or repo_dir)
+        safe_commit = sanitize_id(commit)
+        index_dir = self.index_root / _INDEX_VERSION / safe_repo / safe_commit / embedder_id
+        cache_key = (index_dir, commit)
+        if cache_key in self._index_cache:
+            return self._index_cache[cache_key]
 
-        index_dirs = [index_dir, legacy_dir, flat_dir]
-        for candidate in index_dirs:
-            if candidate in self._index_cache:
-                return self._index_cache[candidate]
-
-        for candidate in index_dirs:
-            embeddings_path = candidate / "embeddings.pt"
-            metadata_path = candidate / "metadata.jsonl"
-            meta_path = candidate / "meta.json"
-            if embeddings_path.exists() and metadata_path.exists():
-                index = self._load_index(embeddings_path, metadata_path, meta_path, repo_dir, commit)
-                self._index_cache[candidate] = index
-                return index
-
-        index_dir.mkdir(parents=True, exist_ok=True)
         embeddings_path = index_dir / "embeddings.pt"
         metadata_path = index_dir / "metadata.jsonl"
         meta_path = index_dir / "meta.json"
-        index = self._build_index(repo_path, repo_dir, commit, embeddings_path, metadata_path, meta_path)
-        self._index_cache[index_dir] = index
+        if embeddings_path.exists() and metadata_path.exists():
+            meta = self._load_meta(meta_path)
+            if self._is_meta_compatible(
+                meta,
+                repo_dir=repo_dir,
+                repo_slug=repo_slug,
+                commit=commit,
+                repo_fingerprint=repo_fingerprint,
+            ):
+                index = self._load_index(
+                    embeddings_path,
+                    metadata_path,
+                    meta_path,
+                    repo_dir,
+                    repo_slug,
+                    commit,
+                    repo_fingerprint,
+                    meta=meta,
+                )
+                self._index_cache[cache_key] = index
+                return index
+
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index = self._build_index(
+            repo_path=repo_path,
+            repo_dir=repo_dir,
+            repo_slug=repo_slug,
+            commit=commit,
+            repo_fingerprint=repo_fingerprint,
+            embeddings_path=embeddings_path,
+            metadata_path=metadata_path,
+            meta_path=meta_path,
+        )
+        self._index_cache[cache_key] = index
         return index
 
     def _build_index(
         self,
         repo_path: Path,
         repo_dir: str,
+        repo_slug: str,
         commit: str,
+        repo_fingerprint: str,
         embeddings_path: Path,
         metadata_path: Path,
         meta_path: Path,
@@ -416,7 +524,17 @@ class FileRadarSearchTool:
             embeddings = self.embedder.embed(texts)
             metadata = [self._chunk_to_meta(chunk) for chunk in chunks]
 
-        self._save_index(embeddings, metadata, embeddings_path, metadata_path, meta_path, repo_dir, commit)
+        self._save_index(
+            embeddings=embeddings,
+            metadata=metadata,
+            embeddings_path=embeddings_path,
+            metadata_path=metadata_path,
+            meta_path=meta_path,
+            repo_dir=repo_dir,
+            repo_slug=repo_slug,
+            commit=commit,
+            repo_fingerprint=repo_fingerprint,
+        )
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         return FileRadarIndex(embeddings, metadata, meta)
 
@@ -473,7 +591,9 @@ class FileRadarSearchTool:
         metadata_path: Path,
         meta_path: Path,
         repo_dir: str,
+        repo_slug: str,
         commit: str,
+        repo_fingerprint: str,
     ) -> None:
         torch = __import__("torch")
         torch.save(embeddings, embeddings_path)
@@ -483,7 +603,9 @@ class FileRadarSearchTool:
         meta = {
             "index_version": _INDEX_VERSION,
             "repo_dir": repo_dir,
+            "repo_slug": repo_slug,
             "base_commit": commit,
+            "repo_fingerprint": repo_fingerprint,
             "embedding_provider": self.config.embedding_provider,
             "embedding_model": self.config.embedding_model,
             "chunker": self.config.chunker,
@@ -499,7 +621,11 @@ class FileRadarSearchTool:
         metadata_path: Path,
         meta_path: Path,
         repo_dir: str,
+        repo_slug: str,
         commit: str,
+        repo_fingerprint: str,
+        *,
+        meta: dict[str, Any] | None = None,
     ) -> FileRadarIndex:
         torch = __import__("torch")
         embeddings = torch.load(embeddings_path, map_location="cpu")
@@ -510,13 +636,30 @@ class FileRadarSearchTool:
                 if not line:
                     continue
                 metadata.append(json.loads(line))
-        if meta_path.exists():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        else:
+        if meta is None:
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            else:
+                meta = {
+                    "index_version": _INDEX_VERSION,
+                    "repo_dir": repo_dir,
+                    "repo_slug": repo_slug,
+                    "base_commit": commit,
+                    "repo_fingerprint": repo_fingerprint,
+                    "embedding_provider": self.config.embedding_provider,
+                    "embedding_model": self.config.embedding_model,
+                    "chunker": self.config.chunker,
+                    "chunk_size": self.config.chunk_size,
+                    "overlap": self.config.overlap,
+                    "aggregation": self.config.aggregation,
+                }
+        if not meta:
             meta = {
                 "index_version": _INDEX_VERSION,
                 "repo_dir": repo_dir,
+                "repo_slug": repo_slug,
                 "base_commit": commit,
+                "repo_fingerprint": repo_fingerprint,
                 "embedding_provider": self.config.embedding_provider,
                 "embedding_model": self.config.embedding_model,
                 "chunker": self.config.chunker,

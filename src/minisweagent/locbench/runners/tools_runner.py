@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import json
 import random
 import shlex
 import shutil
@@ -22,6 +23,7 @@ from jinja2 import StrictUndefined, Template
 from rich.live import Live
 
 from minisweagent.agents.tool_agent import FormatError, Submitted, ToolAgent, ToolExecutionError, ToolFormatError
+from minisweagent.agents.tool_agent import ExecutionTimeoutError, LimitsExceeded
 from minisweagent.config import get_config_path
 from minisweagent.environments import get_environment
 from minisweagent.environments.repo_mounts import build_repo_mount_args
@@ -64,6 +66,8 @@ def _get_last_assistant_content(agent: ToolAgent | None) -> str:
 
 
 class ProgressTrackingAgent(ToolAgent):
+    _STRICT_RECOVERY_THRESHOLD = 3
+
     def __init__(
         self,
         *args,
@@ -80,28 +84,118 @@ class ProgressTrackingAgent(ToolAgent):
         self.needs_verification = False
         self.candidate_files: set[str] = set()
         self.verified_files: set[str] = set()
+        self.inspected_files: set[str] = set()
         self.verification_read_commands = {"rg", "grep", "sed", "cat", "nl", "head", "tail"}
+        self._read_error_markers = (
+            "no such file or directory",
+            "io error for operation on",
+            "can't read",
+            "cannot open",
+            "permission denied",
+            "not a regular file",
+        )
         self._control_tokens = {"&&", "||", ";", "|"}
 
         self.radar_called_count = 0
         self.radar_tool_output_chars = 0
         self.blocked_submission_count = 0
+        self._verification_interception_streak = 0
+        self._strict_recovery_mode = False
 
-    def _verification_interception_message(self) -> str:
+    def _candidate_preview_lines(self, *, include_inspected: bool = False) -> str:
         candidates = sorted(self.candidate_files)
         preview = candidates[:5]
         preview_lines = "\n".join(f"- {path}" for path in preview) if preview else "- <none recorded>"
         if len(candidates) > len(preview):
             preview_lines += f"\n- ... ({len(candidates) - len(preview)} more)"
+        if include_inspected:
+            inspected = sorted(self.inspected_files)
+            inspected_preview = inspected[:5]
+            if inspected_preview:
+                preview_lines += "\nObserved read files:\n" + "\n".join(f"- {path}" for path in inspected_preview)
+                if len(inspected) > len(inspected_preview):
+                    preview_lines += f"\n- ... ({len(inspected) - len(inspected_preview)} more)"
+        return preview_lines
+
+    def _strict_recovery_template(self) -> str:
+        target = sorted(self.candidate_files)[0] if self.candidate_files else "path/to/candidate.py"
+        target_quoted = shlex.quote(target)
+        target_json = target.replace("\\", "\\\\").replace('"', '\\"')
         return (
+            f"sed -n '1,80p' {target_quoted} >/dev/null && "
+            "printf 'MINI_SWE_AGENT_FINAL_OUTPUT\\n"
+            "{\"functions\":[{\"function\":\"...\",\"file_hint\":\""
+            f"{target_json}"
+            "\"}]}\\n'"
+        )
+
+    def _strict_recovery_message(self, reason: str) -> str:
+        return (
+            f"{reason}\n"
+            "STRICT_RECOVERY_MODE: Multiple invalid submit attempts were intercepted.\n"
+            "Your NEXT reply must be exactly one bash command in one code block, and it must:\n"
+            "1) read a radar candidate file, and 2) print MINI_SWE_AGENT_FINAL_OUTPUT JSON.\n"
+            "Single allowed template:\n"
+            f"`{self._strict_recovery_template()}`\n"
+            "Do not call @tool. Do not submit without a read command."
+        )
+
+    def _verification_interception_message(self) -> str:
+        base = (
             "SYSTEM_INTERCEPTION: Verification Required.\n"
             "You invoked file_radar_search, but have not inspected any returned candidate file with bash.\n"
             "This is not a JSON formatting error.\n"
             "Before submitting final output, run at least one successful bash read command on a candidate file.\n"
             "Allowed commands: rg, grep, sed, cat, nl, head, tail.\n"
             "Examples: `rg -n \"token\" path/to/candidate.py` or `sed -n '1,80p' path/to/candidate.py`.\n"
+            "If you are near the step limit, combine verification and submission in one command.\n"
+            "Example: `sed -n '1,80p' path/to/candidate.py >/dev/null && printf 'MINI_SWE_AGENT_FINAL_OUTPUT\\n{...}\\n'`.\n"
             "Candidate files from radar:\n"
-            f"{preview_lines}"
+            f"{self._candidate_preview_lines()}"
+        )
+        if self._strict_recovery_mode:
+            return self._strict_recovery_message(base)
+        return base
+
+    def _submission_read_interception_message(self, uninspected_hints: list[str]) -> str:
+        lines = "\n".join(f"- {item}" for item in uninspected_hints)
+        base = (
+            "SYSTEM_INTERCEPTION: Submission Read Verification Required.\n"
+            "This is not a JSON formatting error.\n"
+            "Your final JSON includes file_hint values that were not observed in bash read history.\n"
+            "You must read each submitted file_hint with rg/grep/sed/cat/nl/head/tail before submitting.\n"
+            "Unverified file_hint values:\n"
+            f"{lines}\n"
+            "Radar candidates and read history:\n"
+            f"{self._candidate_preview_lines(include_inspected=True)}"
+        )
+        if self._strict_recovery_mode:
+            return self._strict_recovery_message(base)
+        return base
+
+    def _register_interception(self) -> None:
+        self.blocked_submission_count += 1
+        self._verification_interception_streak += 1
+        if self._verification_interception_streak >= self._STRICT_RECOVERY_THRESHOLD:
+            self._strict_recovery_mode = True
+
+    def _reset_interception_guard(self) -> None:
+        self._verification_interception_streak = 0
+        self._strict_recovery_mode = False
+
+    def _verification_final_prompt_message(self) -> str:
+        candidates = sorted(self.candidate_files)
+        target = candidates[0] if candidates else "path/to/candidate.py"
+        return (
+            "FINAL STEP OVERRIDE: Verification is still required before submission.\n"
+            "This message supersedes the normal final-output instruction.\n"
+            "You must run exactly ONE bash command that BOTH:\n"
+            "1) Reads at least one candidate file from file_radar_search\n"
+            "2) Prints the final output marker and JSON payload\n"
+            "Use a pattern like:\n"
+            f"`sed -n '1,80p' {target} >/dev/null && printf 'MINI_SWE_AGENT_FINAL_OUTPUT\\n{{\"functions\":[...]}}\\n'`\n"
+            "Candidate files from radar:\n"
+            f"{self._candidate_preview_lines()}"
         )
 
     def step(self) -> dict:
@@ -111,31 +205,65 @@ class ProgressTrackingAgent(ToolAgent):
         )
         return super().step()
 
+    def query(self) -> dict:
+        if (
+            self.config.step_limit > 0
+            and self.model.n_calls == self.config.step_limit - 1
+            and self.config.final_prompt_template
+            and not self._final_prompt_injected
+        ):
+            if self.enforce_tool_verification and self.needs_verification:
+                self.add_message("user", self._verification_final_prompt_message())
+            else:
+                self.add_message("user", self.render_template(self.config.final_prompt_template))
+            self._final_prompt_injected = True
+        if 0 < self.config.step_limit <= self.model.n_calls or 0 < self.config.cost_limit <= self.model.cost:
+            raise LimitsExceeded()
+        response = self.model.query(self.messages)
+        self.add_message("assistant", **response)
+        return response
+
+    def parse_action(self, response: dict) -> dict:
+        action = super().parse_action(response)
+        if self._strict_recovery_mode and not self._is_valid_strict_recovery_action(action):
+            raise FormatError(self._verification_interception_message())
+        return action
+
+    def _is_valid_strict_recovery_action(self, action: dict) -> bool:
+        if action.get("type") != "bash":
+            return False
+        command = str(action.get("command", "") or "")
+        if "MINI_SWE_AGENT_FINAL_OUTPUT" not in command and "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in command:
+            return False
+        if not self._is_read_command(command):
+            return False
+        tokens = self._tokenize_command(command)
+        if not tokens:
+            return False
+        candidate_tokens: set[str] = set()
+        for path in self.candidate_files:
+            cleaned = path.strip()
+            if not cleaned:
+                continue
+            candidate_tokens.add(cleaned)
+            candidate_tokens.add(f"./{cleaned}")
+            candidate_tokens.add(Path(cleaned).name)
+        return bool(candidate_tokens.intersection(tokens))
+
     def _is_read_command(self, command: str) -> bool:
-        try:
-            parts = shlex.split(command)
-        except ValueError:
-            parts = command.split()
+        parts = self._tokenize_command(command)
         if not parts:
             return False
         return any(part in self.verification_read_commands for part in parts)
 
-    def _mark_verification_from_command(self, command: str, output: dict[str, Any]) -> None:
-        if not self.needs_verification or not self.candidate_files:
-            return
-        return_code = output.get("returncode", None)
-        if return_code is None:
-            return
-        if int(return_code) != 0:
-            return
-        if not self._is_read_command(command):
-            return
-
+    def _tokenize_command(self, command: str) -> list[str]:
         try:
-            tokens = shlex.split(command)
+            return shlex.split(command)
         except ValueError:
-            return
+            return command.split()
 
+    def _split_command_segments(self, command: str) -> list[list[str]]:
+        tokens = self._tokenize_command(command)
         segments: list[list[str]] = []
         current: list[str] = []
         for token in tokens:
@@ -147,6 +275,148 @@ class ProgressTrackingAgent(ToolAgent):
             current.append(token)
         if current:
             segments.append(current)
+        return segments
+
+    def _repo_root(self) -> Path | None:
+        raw = self.extra_template_vars.get("repo_path")
+        if not raw:
+            return None
+        try:
+            return Path(str(raw)).resolve()
+        except OSError:
+            return None
+
+    def _normalize_path_token(self, token: str, *, workdir: str) -> str | None:
+        cleaned = token.strip().strip(",;)")
+        if not cleaned:
+            return None
+        if cleaned.startswith("-"):
+            return None
+        if cleaned.startswith((">", "<")):
+            return None
+        if cleaned in {".", "..", "/dev/null"}:
+            return None
+        if any(marker in cleaned for marker in ("*", "?", "[", "]", "{", "}", "$(", "`")):
+            return None
+        if workdir and cleaned.startswith(f"{workdir}/"):
+            cleaned = cleaned[len(workdir) + 1 :]
+        if cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if cleaned.startswith("/"):
+            return None
+        if not cleaned:
+            return None
+        return Path(cleaned).as_posix()
+
+    def _resolve_paths_from_segment(self, segment: list[str], *, workdir: str) -> set[str]:
+        repo_root = self._repo_root()
+        if repo_root is None:
+            return set()
+        resolved: set[str] = set()
+        for token in segment[1:]:
+            normalized = self._normalize_path_token(token, workdir=workdir)
+            if not normalized:
+                continue
+            candidate = (repo_root / normalized).resolve()
+            try:
+                candidate.relative_to(repo_root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                resolved.add(candidate.relative_to(repo_root).as_posix())
+        return resolved
+
+    def _extract_paths_from_search_output(self, output_text: str, *, workdir: str) -> set[str]:
+        repo_root = self._repo_root()
+        if repo_root is None:
+            return set()
+        resolved: set[str] = set()
+        for line in output_text.splitlines():
+            candidate = ""
+            lowered = line.lower()
+            if lowered.startswith("binary file ") and " matches" in lowered:
+                candidate = line[len("binary file ") :].split(" matches", 1)[0].strip()
+            elif ":" in line:
+                candidate = line.split(":", 1)[0].strip()
+            if not candidate:
+                continue
+            normalized = self._normalize_path_token(candidate, workdir=workdir)
+            if not normalized:
+                continue
+            resolved_path = (repo_root / normalized).resolve()
+            try:
+                resolved_path.relative_to(repo_root)
+            except ValueError:
+                continue
+            if resolved_path.is_file():
+                resolved.add(resolved_path.relative_to(repo_root).as_posix())
+        return resolved
+
+    def _extract_submission_file_hints(self, submission_payload: str) -> list[str]:
+        text = submission_payload.strip()
+        if not text:
+            return []
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+        functions = payload.get("functions")
+        if not isinstance(functions, list):
+            return []
+        hints: list[str] = []
+        seen: set[str] = set()
+        workdir = str(self.extra_template_vars.get("workdir") or "").rstrip("/")
+        for item in functions:
+            if not isinstance(item, dict):
+                continue
+            raw_hint = item.get("file_hint")
+            if not isinstance(raw_hint, str):
+                continue
+            normalized = self._normalize_path_token(raw_hint, workdir=workdir)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            hints.append(normalized)
+        return hints
+
+    def _is_hint_inspected(self, hint: str) -> bool:
+        observed = set(self.inspected_files) | set(self.verified_files)
+        if not observed:
+            return False
+        if hint in observed:
+            return True
+        basename = Path(hint).name
+        basename_hits = [item for item in observed if Path(item).name == basename]
+        if basename and len(basename_hits) == 1:
+            return True
+        if "/" in hint:
+            return any(item.endswith(hint) for item in observed)
+        return False
+
+    def _allows_read_verification(self, *, command_name: str, return_code: int, output_text: str) -> bool:
+        if command_name not in self.verification_read_commands:
+            return False
+        if return_code == 0:
+            return True
+        if return_code != 1:
+            return False
+        lowered = output_text.lower()
+        return not any(marker in lowered for marker in self._read_error_markers)
+
+    def _mark_verification_from_command(self, command: str, output: dict[str, Any]) -> None:
+        return_code = output.get("returncode", None)
+        if return_code is None:
+            return
+        try:
+            parsed_return_code = int(return_code)
+        except (TypeError, ValueError):
+            return
+        if not self._is_read_command(command):
+            return
+
+        segments = self._split_command_segments(command)
 
         basename_counts: dict[str, int] = {}
         for file_path in self.candidate_files:
@@ -155,14 +425,30 @@ class ProgressTrackingAgent(ToolAgent):
                 basename_counts[name] = basename_counts.get(name, 0) + 1
 
         workdir = str(self.extra_template_vars.get("workdir") or "").rstrip("/")
+        output_text = str(output.get("output", "") or "")
         for segment in segments:
             if not segment:
                 continue
             cmd_name = Path(segment[0]).name
-            if cmd_name not in self.verification_read_commands:
+            if not self._allows_read_verification(
+                command_name=cmd_name,
+                return_code=parsed_return_code,
+                output_text=output_text,
+            ):
                 continue
+            resolved_paths = self._resolve_paths_from_segment(segment, workdir=workdir)
+            if cmd_name in {"rg", "grep"}:
+                resolved_paths.update(self._extract_paths_from_search_output(output_text, workdir=workdir))
+            self.inspected_files.update(resolved_paths)
+
+            if not self.needs_verification or not self.candidate_files:
+                continue
+
             segment_tokens = {token.strip() for token in segment}
             for file_path in self.candidate_files:
+                if file_path in resolved_paths:
+                    self.verified_files.add(file_path)
+                    continue
                 rel = file_path.strip()
                 if not rel:
                     continue
@@ -174,9 +460,17 @@ class ProgressTrackingAgent(ToolAgent):
                     candidate_tokens.add(basename)
                 if candidate_tokens & segment_tokens:
                     self.verified_files.add(file_path)
+                    continue
+                if cmd_name in {"rg", "grep"} and (
+                    f"{rel}:" in output_text
+                    or f"./{rel}:" in output_text
+                    or f"binary file {rel.lower()} matches" in output_text.lower()
+                ):
+                    self.verified_files.add(file_path)
 
-        if self.verified_files:
+        if self.needs_verification and self.verified_files:
             self.needs_verification = False
+            self._reset_interception_guard()
 
     def execute_tool(self, action: dict) -> dict:
         try:
@@ -210,6 +504,7 @@ class ProgressTrackingAgent(ToolAgent):
                     candidate_files.add(path.strip())
             self.candidate_files = candidate_files
             self.verified_files = set()
+            self._reset_interception_guard()
             self.needs_verification = self.enforce_tool_verification and bool(candidate_files)
 
         return {
@@ -221,9 +516,16 @@ class ProgressTrackingAgent(ToolAgent):
         }
 
     def execute_bash(self, action: dict) -> dict:
-        output = super().execute_bash(action)
+        try:
+            output = self.env.execute(action["command"])
+        except (TimeoutError, subprocess.TimeoutExpired) as exc:
+            timeout_output = exc.output.decode("utf-8", errors="replace") if getattr(exc, "output", None) else ""
+            raise ExecutionTimeoutError(
+                self.render_template(self.config.timeout_template, action=action, output=timeout_output)
+            ) from exc
         self._mark_verification_from_command(action.get("command", ""), output)
-        return output
+        self.has_finished(output)
+        return output | {"type": "bash", "action": action["command"]}
 
     def has_finished(self, output: dict[str, str]):
         lines = output.get("output", "").lstrip().splitlines(keepends=True)
@@ -233,9 +535,17 @@ class ProgressTrackingAgent(ToolAgent):
         if marker not in {"MINI_SWE_AGENT_FINAL_OUTPUT", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"}:
             return
         if self.enforce_tool_verification and self.needs_verification:
-            self.blocked_submission_count += 1
+            self._register_interception()
             raise FormatError(self._verification_interception_message())
-        raise Submitted("".join(lines[1:]))
+        submission_payload = "".join(lines[1:])
+        if self.enforce_tool_verification and self.radar_called_count:
+            hints = self._extract_submission_file_hints(submission_payload)
+            uninspected_hints = [hint for hint in hints if not self._is_hint_inspected(hint)]
+            if uninspected_hints:
+                self._register_interception()
+                raise FormatError(self._submission_read_interception_message(uninspected_hints))
+        self._reset_interception_guard()
+        raise Submitted(submission_payload)
 
 
 class ToolsRunner:
