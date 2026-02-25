@@ -1022,7 +1022,7 @@ def _process_instance(
             instance_id=instance_id,
             enforce_tool_verification=enforce_tool_verification,
             disallow_tools=oracle_sniper_mode,
-            oracle_files=list(instance.get("oracle_files") or []),
+            oracle_files=list(instance.get("oracle_files") or []) if oracle_sniper_mode else [],
             **config.get("agent", {}),
         )
         exit_status, result = agent.run(task, **instance)
