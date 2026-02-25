@@ -105,6 +105,10 @@ class ProgressTrackingAgent(ToolAgent):
         self.radar_called_count = 0
         self.radar_tool_output_chars = 0
         self.blocked_submission_count = 0
+        self.radar_index_status_counts: dict[str, int] = {}
+        self.radar_last_index_status: str | None = None
+        self.radar_last_index_reason: str | None = None
+        self.radar_last_index_dir: str | None = None
         self._verification_interception_streak = 0
         self._strict_recovery_mode = False
 
@@ -520,6 +524,17 @@ class ProgressTrackingAgent(ToolAgent):
         if command.startswith("@tool file_radar_search"):
             self.radar_called_count += 1
             self.radar_tool_output_chars += len(result.output or "")
+            if isinstance(result.data, dict):
+                index_status = str(result.data.get("index_status") or "").strip()
+                if index_status:
+                    self.radar_index_status_counts[index_status] = self.radar_index_status_counts.get(index_status, 0) + 1
+                    self.radar_last_index_status = index_status
+                index_reason = str(result.data.get("index_compat_reason") or "").strip()
+                if index_reason:
+                    self.radar_last_index_reason = index_reason
+                index_dir = str(result.data.get("index_dir") or "").strip()
+                if index_dir:
+                    self.radar_last_index_dir = index_dir
             candidate_files: set[str] = set()
             for item in result.data.get("results", []) if isinstance(result.data, dict) else []:
                 path = item.get("path")
@@ -1064,6 +1079,10 @@ def _process_instance(
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
         inspected_files = sorted(getattr(agent, "inspected_files", set())) if agent else []
+        radar_index_status_counts = dict(getattr(agent, "radar_index_status_counts", {})) if agent else {}
+        radar_last_index_status = getattr(agent, "radar_last_index_status", None) if agent else None
+        radar_last_index_reason = getattr(agent, "radar_last_index_reason", None) if agent else None
+        radar_last_index_dir = getattr(agent, "radar_last_index_dir", None) if agent else None
         oracle_files = list(instance.get("oracle_files") or [])
         oracle_primary_file = str(instance.get("oracle_primary_file") or "")
         oracle_file_provided = bool(oracle_files)
@@ -1091,6 +1110,10 @@ def _process_instance(
             output_record["radar_verified_files"] = radar_verified_files
             output_record["inspected_files"] = inspected_files
             output_record["radar_verification_satisfied"] = verification_satisfied
+            output_record["radar_index_status_counts"] = radar_index_status_counts
+            output_record["radar_last_index_status"] = radar_last_index_status
+            output_record["radar_last_index_reason"] = radar_last_index_reason
+            output_record["radar_last_index_dir"] = radar_last_index_dir
             output_record["oracle_sniper_mode"] = oracle_sniper_mode
             output_record["oracle_file_provided"] = oracle_file_provided
             output_record["oracle_file_count"] = len(oracle_files)
@@ -1123,6 +1146,10 @@ def _process_instance(
             summary_record["radar_tool_output_chars"] = radar_tool_output_chars
             summary_record["blocked_submission_count"] = blocked_submission_count
             summary_record["radar_verification_satisfied"] = verification_satisfied
+            summary_record["radar_index_status_counts"] = radar_index_status_counts
+            summary_record["radar_last_index_status"] = radar_last_index_status
+            summary_record["radar_last_index_reason"] = radar_last_index_reason
+            summary_record["radar_last_index_dir"] = radar_last_index_dir
             summary_record["oracle_sniper_mode"] = oracle_sniper_mode
             summary_record["oracle_file_provided"] = oracle_file_provided
             summary_record["oracle_file_count"] = len(oracle_files)

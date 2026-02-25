@@ -11,3 +11,11 @@ trust_remote_code: true
 index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code"
 max_file_size: 524288
 aggregation: hybrid
+# 索引兼容性校验模式：
+# - strict: 包含 repo_fingerprint(路径敏感)
+# - static: 忽略路径指纹，仅按 repo_slug/base_commit/embedding/chunk 参数校验
+index_validation_mode: static
+# 索引构建策略：
+# - auto: 缺失或不兼容时自动重建
+# - read_only: 只允许复用已建索引，不兼容直接报错
+index_build_policy: read_only

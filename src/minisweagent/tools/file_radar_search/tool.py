@@ -94,6 +94,12 @@ class FileRadarSearchConfig:
     index_root: str = "~/.cache/mini-swe-agent/indexes"
     max_file_size: int = 512 * 1024
     aggregation: str = "hybrid"
+    # strict: include repo_fingerprint(path-sensitive) in compatibility check
+    # static: ignore repo_fingerprint and focus on repo slug/commit/config compatibility
+    index_validation_mode: str = "strict"
+    # auto: rebuild index on miss/incompatible
+    # read_only: require compatible prebuilt index, never rebuild
+    index_build_policy: str = "read_only"
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "FileRadarSearchConfig":
@@ -261,6 +267,10 @@ class FileRadarSearchTool:
             raise ValueError(f"Unsupported chunker: {self.config.chunker}")
         if self.config.aggregation not in {"hybrid", "max", "sum"}:
             raise ValueError("aggregation must be one of: hybrid, max, sum")
+        if self.config.index_validation_mode not in {"strict", "static"}:
+            raise ValueError("index_validation_mode must be one of: strict, static")
+        if self.config.index_build_policy not in {"auto", "read_only"}:
+            raise ValueError("index_build_policy must be one of: auto, read_only")
         self.index_root = Path(os.path.expanduser(self.config.index_root)).resolve()
         self.chunker = SlidingChunker(self.config.chunk_size, self.config.overlap)
         self.embedder = self._build_embedder()
@@ -289,7 +299,7 @@ class FileRadarSearchTool:
                 base_commit = str(context.get("base_commit", "HEAD"))
                 repo_fingerprint = self._repo_fingerprint(repo_path)
 
-                index = self._get_or_build_index(
+                index, index_debug = self._get_or_build_index(
                     repo_path=repo_path,
                     repo_dir=repo_dir,
                     repo_slug=repo_slug,
@@ -315,6 +325,11 @@ class FileRadarSearchTool:
                     "metadata": index.meta,
                     "repo_slug": repo_slug,
                     "base_commit": base_commit,
+                    "index_status": index_debug.get("index_status"),
+                    "index_compat_reason": index_debug.get("compat_reason"),
+                    "index_dir": index_debug.get("index_dir"),
+                    "index_validation_mode": self.config.index_validation_mode,
+                    "index_build_policy": self.config.index_build_policy,
                 }
                 return ToolResult(success=True, data=data, output=formatted, returncode=0)
         except ValueError:
@@ -406,7 +421,7 @@ class FileRadarSearchTool:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def _is_meta_compatible(
+    def _check_meta_compatibility(
         self,
         meta: dict[str, Any],
         *,
@@ -414,38 +429,51 @@ class FileRadarSearchTool:
         repo_slug: str,
         commit: str,
         repo_fingerprint: str,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         if not meta:
-            return False
+            return False, "meta_missing"
         if str(meta.get("index_version") or "") != _INDEX_VERSION:
-            return False
+            return False, "index_version_mismatch"
         if str(meta.get("repo_dir") or "") != repo_dir:
-            return False
+            return False, "repo_dir_mismatch"
         if str(meta.get("repo_slug") or "") != repo_slug:
-            return False
-        if str(meta.get("repo_fingerprint") or "") != repo_fingerprint:
-            return False
+            return False, "repo_slug_mismatch"
+        if self.config.index_validation_mode == "strict":
+            if str(meta.get("repo_fingerprint") or "") != repo_fingerprint:
+                return False, "repo_fingerprint_mismatch"
         base_commit = str(meta.get("base_commit") or "")
         if not base_commit:
-            return False
+            return False, "base_commit_missing"
         if base_commit != commit:
-            return False
+            return False, "base_commit_mismatch"
         if str(meta.get("embedding_provider") or "") != self.config.embedding_provider:
-            return False
+            return False, "embedding_provider_mismatch"
         if str(meta.get("embedding_model") or "") != self.config.embedding_model:
-            return False
+            return False, "embedding_model_mismatch"
         if str(meta.get("chunker") or "") != self.config.chunker:
-            return False
+            return False, "chunker_mismatch"
         try:
             chunk_size = int(meta.get("chunk_size"))
             overlap = int(meta.get("overlap"))
         except (TypeError, ValueError):
-            return False
+            return False, "chunk_params_invalid"
         if chunk_size != self.config.chunk_size or overlap != self.config.overlap:
-            return False
+            return False, "chunk_params_mismatch"
         if str(meta.get("aggregation") or "") != self.config.aggregation:
-            return False
-        return True
+            return False, "aggregation_mismatch"
+        return True, "ok"
+
+    def _read_only_error(self, *, index_dir: Path, reason: str, repo_slug: str, commit: str) -> RuntimeError:
+        message = (
+            "file_radar_search index reuse required "
+            "(index_build_policy=read_only), but no compatible prebuilt index is available.\n"
+            f"reason={reason}\n"
+            f"repo_slug={repo_slug}\n"
+            f"base_commit={commit}\n"
+            f"index_dir={index_dir}\n"
+            "Set index_build_policy=auto to allow rebuilding, or prebuild a compatible index."
+        )
+        return RuntimeError(message)
 
     def _get_or_build_index(
         self,
@@ -455,27 +483,36 @@ class FileRadarSearchTool:
         repo_slug: str,
         commit: str,
         repo_fingerprint: str,
-    ) -> FileRadarIndex:
+    ) -> tuple[FileRadarIndex, dict[str, Any]]:
         embedder_id = sanitize_id(f"{self.config.embedding_provider}_{self.config.embedding_model}")
         safe_repo = sanitize_id(repo_slug or repo_dir)
         safe_commit = sanitize_id(commit)
         index_dir = self.index_root / _INDEX_VERSION / safe_repo / safe_commit / embedder_id
+        diagnostics: dict[str, Any] = {
+            "index_dir": str(index_dir),
+            "index_status": "",
+            "compat_reason": "",
+        }
         cache_key = (index_dir, commit)
         if cache_key in self._index_cache:
-            return self._index_cache[cache_key]
+            diagnostics["index_status"] = "cache_hit"
+            diagnostics["compat_reason"] = "cached"
+            return self._index_cache[cache_key], diagnostics
 
         embeddings_path = index_dir / "embeddings.pt"
         metadata_path = index_dir / "metadata.jsonl"
         meta_path = index_dir / "meta.json"
         if embeddings_path.exists() and metadata_path.exists():
             meta = self._load_meta(meta_path)
-            if self._is_meta_compatible(
+            compatible, reason = self._check_meta_compatibility(
                 meta,
                 repo_dir=repo_dir,
                 repo_slug=repo_slug,
                 commit=commit,
                 repo_fingerprint=repo_fingerprint,
-            ):
+            )
+            diagnostics["compat_reason"] = reason
+            if compatible:
                 index = self._load_index(
                     embeddings_path,
                     metadata_path,
@@ -487,7 +524,18 @@ class FileRadarSearchTool:
                     meta=meta,
                 )
                 self._index_cache[cache_key] = index
-                return index
+                diagnostics["index_status"] = "disk_hit"
+                return index, diagnostics
+            if self.config.index_build_policy == "read_only":
+                raise self._read_only_error(index_dir=index_dir, reason=reason, repo_slug=repo_slug, commit=commit)
+        elif self.config.index_build_policy == "read_only":
+            diagnostics["compat_reason"] = "index_missing"
+            raise self._read_only_error(
+                index_dir=index_dir,
+                reason=diagnostics["compat_reason"],
+                repo_slug=repo_slug,
+                commit=commit,
+            )
 
         index_dir.mkdir(parents=True, exist_ok=True)
         index = self._build_index(
@@ -501,7 +549,10 @@ class FileRadarSearchTool:
             meta_path=meta_path,
         )
         self._index_cache[cache_key] = index
-        return index
+        diagnostics["index_status"] = "rebuilt"
+        if not diagnostics["compat_reason"]:
+            diagnostics["compat_reason"] = "index_missing"
+        return index, diagnostics
 
     def _build_index(
         self,
