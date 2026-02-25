@@ -1035,7 +1035,8 @@ def _process_instance(
             if enforce_tool_verification and agent and getattr(agent, "needs_verification", False):
                 agent.blocked_submission_count += 1
                 exit_status = "VerificationRequired"
-                result = build_fallback_loc_result("")
+                # Keep the extracted fallback result instead of discarding it;
+                # build_loc_output will still produce found_files from it.
         stats = build_answer_stats(model)
     except Exception as exc:
         logger.error("Error processing instance %s: %s", instance_id, exc, exc_info=True)

@@ -70,6 +70,16 @@ def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
 
         class Visitor(__import__("ast").NodeVisitor):
             def visit_ClassDef(self, node):  # type: ignore[override]
+                cls_name = getattr(node, "name", "")
+                if cls_name:
+                    qual_parts = class_stack + [cls_name]
+                    qualname = ".".join(qual_parts) if len(qual_parts) > 1 else cls_name
+                    record = {
+                        "file": rel_path,
+                        "name": cls_name,
+                        "qualname": qualname,
+                    }
+                    index.setdefault(cls_name, []).append(record)
                 class_stack.append(node.name)
                 self.generic_visit(node)
                 class_stack.pop()
@@ -96,7 +106,10 @@ def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
                 self.generic_visit(node)
                 func_stack.pop()
 
-        Visitor().visit(tree)
+        try:
+            Visitor().visit(tree)
+        except RecursionError:
+            continue
     return index
 
 
@@ -142,22 +155,32 @@ def map_functions_to_entities(
         if not func:
             continue
         candidates = index.get(func, [])
-        if not candidates:
-            continue
-        if file_hint:
-            selected = _select_best_match(candidates, file_hint)
-        elif len(candidates) == 1:
-            selected = candidates
-        else:
-            selected = candidates[:top_k]
-        for record in selected[:top_k]:
-            entity_id = f"{record['file']}:{record['qualname']}"
+        if not candidates and "." in func:
+            leaf = func.rsplit(".", 1)[-1]
+            candidates = index.get(leaf, [])
+        if candidates:
+            if file_hint:
+                selected = _select_best_match(candidates, file_hint)
+            elif len(candidates) == 1:
+                selected = candidates
+            else:
+                selected = candidates[:top_k]
+            for record in selected[:top_k]:
+                entity_id = f"{record['file']}:{record['qualname']}"
+                if entity_id not in seen_entities:
+                    found_entities.append(entity_id)
+                    seen_entities.add(entity_id)
+                if record["file"] not in seen_files:
+                    found_files.append(record["file"])
+                    seen_files.add(record["file"])
+        elif file_hint:
+            if file_hint not in seen_files:
+                found_files.append(file_hint)
+                seen_files.add(file_hint)
+            entity_id = f"{file_hint}:{func}"
             if entity_id not in seen_entities:
                 found_entities.append(entity_id)
                 seen_entities.add(entity_id)
-            if record["file"] not in seen_files:
-                found_files.append(record["file"])
-                seen_files.add(record["file"])
 
     found_modules = entities_to_modules(found_entities)
     return found_files, found_entities, found_modules
