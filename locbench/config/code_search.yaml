@@ -8,8 +8,12 @@ embedding_max_length: 4096
 # Code search 使用的 GPU：cuda | cuda:0 | cuda:1 | cpu；也可在 local.yaml paths.embedding_device 覆盖
 embedding_device: cuda
 trust_remote_code: true
-index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code"
+index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800"
 max_file_size: 524288
+# 索引兼容性校验模式：
+# - strict: 要求 meta 完整且 base_commit 一致
+# - static: 允许复用每仓库静态索引（可兼容无 meta.json 的旧索引）
+index_validation_mode: static
 # 索引构建策略：
 # - auto: 缺失或不兼容时自动重建
 # - read_only: 只允许复用已建索引，不兼容直接报错

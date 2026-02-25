@@ -217,8 +217,12 @@ def parse_filters(filters: str | None) -> FilterSpec:
 
 
 def matches_filters(meta: dict[str, Any], spec: FilterSpec) -> bool:
+    language = (meta.get("language") or "").lower()
+    if not language:
+        file_path = str(meta.get("file_path") or "")
+        language = _EXT_LANGUAGE.get(Path(file_path).suffix.lower(), "")
     if spec.languages:
-        if (meta.get("language") or "").lower() not in spec.languages:
+        if language not in spec.languages:
             return False
     if spec.paths:
         path = meta.get("file_path", "")
@@ -431,35 +435,43 @@ class FileRadarSearchTool:
         repo_fingerprint: str,
     ) -> tuple[bool, str]:
         if not meta:
+            if self.config.index_validation_mode == "static":
+                return True, "legacy_no_meta"
             return False, "meta_missing"
-        if str(meta.get("index_version") or "") != _INDEX_VERSION:
+        if self.config.index_validation_mode == "strict" and str(meta.get("index_version") or "") != _INDEX_VERSION:
             return False, "index_version_mismatch"
-        if str(meta.get("repo_dir") or "") != repo_dir:
+        meta_repo_dir = str(meta.get("repo_dir") or "")
+        if meta_repo_dir and meta_repo_dir != repo_dir:
             return False, "repo_dir_mismatch"
-        if str(meta.get("repo_slug") or "") != repo_slug:
+        meta_repo_slug = str(meta.get("repo_slug") or "")
+        if meta_repo_slug and meta_repo_slug != repo_slug:
             return False, "repo_slug_mismatch"
         if self.config.index_validation_mode == "strict":
             if str(meta.get("repo_fingerprint") or "") != repo_fingerprint:
                 return False, "repo_fingerprint_mismatch"
-        base_commit = str(meta.get("base_commit") or "")
-        if not base_commit:
-            return False, "base_commit_missing"
-        if base_commit != commit:
-            return False, "base_commit_mismatch"
-        if str(meta.get("embedding_provider") or "") != self.config.embedding_provider:
+            base_commit = str(meta.get("base_commit") or "")
+            if not base_commit:
+                return False, "base_commit_missing"
+            if base_commit != commit:
+                return False, "base_commit_mismatch"
+        meta_provider = str(meta.get("embedding_provider") or "")
+        if meta_provider and meta_provider != self.config.embedding_provider:
             return False, "embedding_provider_mismatch"
-        if str(meta.get("embedding_model") or "") != self.config.embedding_model:
+        meta_model = str(meta.get("embedding_model") or "")
+        if meta_model and meta_model != self.config.embedding_model:
             return False, "embedding_model_mismatch"
-        if str(meta.get("chunker") or "") != self.config.chunker:
+        meta_chunker = str(meta.get("chunker") or "")
+        if meta_chunker and meta_chunker != self.config.chunker:
             return False, "chunker_mismatch"
-        try:
-            chunk_size = int(meta.get("chunk_size"))
-            overlap = int(meta.get("overlap"))
-        except (TypeError, ValueError):
-            return False, "chunk_params_invalid"
-        if chunk_size != self.config.chunk_size or overlap != self.config.overlap:
-            return False, "chunk_params_mismatch"
-        if str(meta.get("aggregation") or "") != self.config.aggregation:
+        if "chunk_size" in meta or "overlap" in meta:
+            try:
+                chunk_size = int(meta.get("chunk_size"))
+                overlap = int(meta.get("overlap"))
+            except (TypeError, ValueError):
+                return False, "chunk_params_invalid"
+            if chunk_size != self.config.chunk_size or overlap != self.config.overlap:
+                return False, "chunk_params_mismatch"
+        if self.config.index_validation_mode == "strict" and str(meta.get("aggregation") or "") != self.config.aggregation:
             return False, "aggregation_mismatch"
         return True, "ok"
 
@@ -487,22 +499,69 @@ class FileRadarSearchTool:
         embedder_id = sanitize_id(f"{self.config.embedding_provider}_{self.config.embedding_model}")
         safe_repo = sanitize_id(repo_slug or repo_dir)
         safe_commit = sanitize_id(commit)
-        index_dir = self.index_root / _INDEX_VERSION / safe_repo / safe_commit / embedder_id
+        roots: list[Path] = [self.index_root]
+        dense_child = self.index_root / "dense_index_llamaindex_code"
+        if dense_child.exists():
+            roots.insert(0, dense_child)
+        resolved_roots: list[Path] = []
+        seen_roots: set[Path] = set()
+        for root in roots:
+            resolved = root.resolve()
+            if resolved in seen_roots:
+                continue
+            seen_roots.add(resolved)
+            resolved_roots.append(resolved)
+
+        primary_root = resolved_roots[0] if resolved_roots else self.index_root
+        index_dir = primary_root / _INDEX_VERSION / safe_repo / safe_commit / embedder_id
+        candidates: list[Path] = []
+        for root in resolved_roots:
+            candidates.extend(
+                [
+                    root / _INDEX_VERSION / safe_repo / safe_commit / embedder_id,
+                    root / _INDEX_VERSION / safe_repo / embedder_id,
+                    root / safe_repo / safe_commit / embedder_id,
+                    root / safe_repo,
+                ]
+            )
+            if repo_dir and sanitize_id(repo_dir) != safe_repo:
+                repo_dir_safe = sanitize_id(repo_dir)
+                candidates.extend(
+                    [
+                        root / _INDEX_VERSION / repo_dir_safe / safe_commit / embedder_id,
+                        root / _INDEX_VERSION / repo_dir_safe / embedder_id,
+                        root / repo_dir_safe / safe_commit / embedder_id,
+                        root / repo_dir_safe,
+                    ]
+                )
+        candidate_dirs: list[Path] = []
+        seen_dirs: set[Path] = set()
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved in seen_dirs:
+                continue
+            seen_dirs.add(resolved)
+            candidate_dirs.append(resolved)
         diagnostics: dict[str, Any] = {
             "index_dir": str(index_dir),
             "index_status": "",
             "compat_reason": "",
         }
-        cache_key = (index_dir, commit)
-        if cache_key in self._index_cache:
-            diagnostics["index_status"] = "cache_hit"
-            diagnostics["compat_reason"] = "cached"
-            return self._index_cache[cache_key], diagnostics
+        for candidate in candidate_dirs:
+            cache_key = (candidate, commit)
+            if cache_key in self._index_cache:
+                diagnostics["index_status"] = "cache_hit"
+                diagnostics["compat_reason"] = "cached"
+                diagnostics["index_dir"] = str(candidate)
+                return self._index_cache[cache_key], diagnostics
 
-        embeddings_path = index_dir / "embeddings.pt"
-        metadata_path = index_dir / "metadata.jsonl"
-        meta_path = index_dir / "meta.json"
-        if embeddings_path.exists() and metadata_path.exists():
+        mismatch_reasons: list[tuple[Path, str]] = []
+        for candidate in candidate_dirs:
+            embeddings_path = candidate / "embeddings.pt"
+            metadata_path = candidate / "metadata.jsonl"
+            meta_path = candidate / "meta.json"
+            if not (embeddings_path.exists() and metadata_path.exists()):
+                continue
             meta = self._load_meta(meta_path)
             compatible, reason = self._check_meta_compatibility(
                 meta,
@@ -523,12 +582,17 @@ class FileRadarSearchTool:
                     repo_fingerprint,
                     meta=meta,
                 )
+                cache_key = (candidate, commit)
                 self._index_cache[cache_key] = index
                 diagnostics["index_status"] = "disk_hit"
+                diagnostics["index_dir"] = str(candidate)
                 return index, diagnostics
-            if self.config.index_build_policy == "read_only":
-                raise self._read_only_error(index_dir=index_dir, reason=reason, repo_slug=repo_slug, commit=commit)
-        elif self.config.index_build_policy == "read_only":
+            mismatch_reasons.append((candidate, reason))
+
+        if self.config.index_build_policy == "read_only":
+            if mismatch_reasons:
+                candidate, reason = mismatch_reasons[0]
+                raise self._read_only_error(index_dir=candidate, reason=reason, repo_slug=repo_slug, commit=commit)
             diagnostics["compat_reason"] = "index_missing"
             raise self._read_only_error(
                 index_dir=index_dir,
@@ -537,6 +601,9 @@ class FileRadarSearchTool:
                 commit=commit,
             )
 
+        embeddings_path = index_dir / "embeddings.pt"
+        metadata_path = index_dir / "metadata.jsonl"
+        meta_path = index_dir / "meta.json"
         index_dir.mkdir(parents=True, exist_ok=True)
         index = self._build_index(
             repo_path=repo_path,
@@ -548,10 +615,9 @@ class FileRadarSearchTool:
             metadata_path=metadata_path,
             meta_path=meta_path,
         )
-        self._index_cache[cache_key] = index
+        self._index_cache[(index_dir, commit)] = index
         diagnostics["index_status"] = "rebuilt"
-        if not diagnostics["compat_reason"]:
-            diagnostics["compat_reason"] = "index_missing"
+        diagnostics["compat_reason"] = mismatch_reasons[0][1] if mismatch_reasons else "index_missing"
         return index, diagnostics
 
     def _build_index(

@@ -179,3 +179,34 @@ def test_read_only_policy_blocks_missing_index(tmp_path: Path):
     message = str(exc_info.value)
     assert "index_build_policy=read_only" in message
     assert "index_missing" in message
+
+
+def test_static_validation_accepts_legacy_repo_level_index_without_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo_slug = "demo/repo"
+    repo_dir = "demo_repo"
+    commit = "abcdef12"
+    tool = _build_tool(tmp_path, index_validation_mode="static", index_build_policy="read_only")
+    legacy_dir = Path(tool.config.index_root) / sanitize_id(repo_slug)
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / "embeddings.pt").write_text("dummy", encoding="utf-8")
+    (legacy_dir / "metadata.jsonl").write_text("{}\n", encoding="utf-8")
+
+    expected_index = object()
+    monkeypatch.setattr(tool, "_load_index", lambda *args, **kwargs: expected_index)
+    monkeypatch.setattr(tool, "_build_index", lambda *args, **kwargs: pytest.fail("unexpected rebuild"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    index, diag = tool._get_or_build_index(
+        repo_path=repo_path,
+        repo_dir=repo_dir,
+        repo_slug=repo_slug,
+        commit=commit,
+        repo_fingerprint="new-fingerprint",
+    )
+
+    assert index is expected_index
+    assert diag["index_status"] == "disk_hit"
+    assert diag["compat_reason"] == "legacy_no_meta"

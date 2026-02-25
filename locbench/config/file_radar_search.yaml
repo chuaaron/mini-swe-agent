@@ -8,7 +8,7 @@ embedding_max_length: 4096
 # Code search/Radar 使用的 GPU：cuda | cuda:0 | cuda:1 | cpu；也可在 local.yaml paths.embedding_device 覆盖
 embedding_device: cuda
 trust_remote_code: true
-index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code"
+index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800"
 max_file_size: 524288
 aggregation: hybrid
 # 索引兼容性校验模式：

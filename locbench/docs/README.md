@@ -26,3 +26,7 @@
 
 1. `tests/` 下是可执行单测代码，保持 pytest 规范。
 2. `locbench/docs/oracle_sniper_test_file.md` 是你要的“测试文件（文档版）”，用于实验与回归操作。
+
+## 5. 问题诊断
+
+1. Agent 索引问题总结（2026-02-25）：`locbench/docs/locbench_agent_index_issues_20260225.md`

@@ -6,7 +6,12 @@ import pytest
 from minisweagent.tools.code_search.tool import _INDEX_VERSION, CodeSearchTool, sanitize_id
 
 
-def _build_tool(tmp_path: Path, *, index_build_policy: str = "auto") -> CodeSearchTool:
+def _build_tool(
+    tmp_path: Path,
+    *,
+    index_build_policy: str = "auto",
+    index_validation_mode: str = "strict",
+) -> CodeSearchTool:
     return CodeSearchTool(
         {
             "embedding_provider": "local",
@@ -16,6 +21,7 @@ def _build_tool(tmp_path: Path, *, index_build_policy: str = "auto") -> CodeSear
             "chunker": "sliding",
             "chunk_size": 800,
             "overlap": 200,
+            "index_validation_mode": index_validation_mode,
             "index_build_policy": index_build_policy,
         }
     )
@@ -142,3 +148,27 @@ def test_cache_hit_reports_status_and_reason(tmp_path: Path, monkeypatch: pytest
     assert second_index is expected_index
     assert second_diag["index_status"] == "cache_hit"
     assert second_diag["compat_reason"] == "cached"
+
+
+def test_static_validation_accepts_legacy_repo_level_index_without_meta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo_dir = "demo_repo"
+    commit = "abcdef12"
+    tool = _build_tool(tmp_path, index_build_policy="read_only", index_validation_mode="static")
+    legacy_dir = Path(tool.config.index_root) / repo_dir
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / "embeddings.pt").write_text("dummy", encoding="utf-8")
+    (legacy_dir / "metadata.jsonl").write_text("{}\n", encoding="utf-8")
+
+    expected_index = object()
+    monkeypatch.setattr(tool, "_load_index", lambda *args, **kwargs: expected_index)
+    monkeypatch.setattr(tool, "_build_index", lambda *args, **kwargs: pytest.fail("unexpected rebuild"))
+
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    index, diag = tool._get_or_build_index(repo_path=repo_path, repo_dir=repo_dir, commit=commit)
+
+    assert index is expected_index
+    assert diag["index_status"] == "disk_hit"
+    assert diag["compat_reason"] == "legacy_no_meta"
