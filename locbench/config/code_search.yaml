@@ -10,3 +10,7 @@ embedding_device: cuda
 trust_remote_code: true
 index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800/dense_index_llamaindex_code"
 max_file_size: 524288
+# 索引构建策略：
+# - auto: 缺失或不兼容时自动重建
+# - read_only: 只允许复用已建索引，不兼容直接报错
+index_build_policy: read_only

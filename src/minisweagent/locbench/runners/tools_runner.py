@@ -104,7 +104,13 @@ class ProgressTrackingAgent(ToolAgent):
 
         self.radar_called_count = 0
         self.radar_tool_output_chars = 0
+        self.code_search_called_count = 0
+        self.code_search_tool_output_chars = 0
         self.blocked_submission_count = 0
+        self.code_search_index_status_counts: dict[str, int] = {}
+        self.code_search_last_index_status: str | None = None
+        self.code_search_last_index_reason: str | None = None
+        self.code_search_last_index_dir: str | None = None
         self.radar_index_status_counts: dict[str, int] = {}
         self.radar_last_index_status: str | None = None
         self.radar_last_index_reason: str | None = None
@@ -521,6 +527,22 @@ class ProgressTrackingAgent(ToolAgent):
             )
 
         command = action.get("raw", "")
+        if command.startswith("@tool code_search"):
+            self.code_search_called_count += 1
+            self.code_search_tool_output_chars += len(result.output or "")
+            if isinstance(result.data, dict):
+                index_status = str(result.data.get("index_status") or "").strip()
+                if index_status:
+                    self.code_search_index_status_counts[index_status] = (
+                        self.code_search_index_status_counts.get(index_status, 0) + 1
+                    )
+                    self.code_search_last_index_status = index_status
+                index_reason = str(result.data.get("index_compat_reason") or "").strip()
+                if index_reason:
+                    self.code_search_last_index_reason = index_reason
+                index_dir = str(result.data.get("index_dir") or "").strip()
+                if index_dir:
+                    self.code_search_last_index_dir = index_dir
         if command.startswith("@tool file_radar_search"):
             self.radar_called_count += 1
             self.radar_tool_output_chars += len(result.output or "")
@@ -1075,10 +1097,16 @@ def _process_instance(
         billing_stats = model.get_billing_stats() if model and hasattr(model, "get_billing_stats") else {}
         radar_called = getattr(agent, "radar_called_count", 0) if agent else 0
         radar_tool_output_chars = getattr(agent, "radar_tool_output_chars", 0) if agent else 0
+        code_search_called = getattr(agent, "code_search_called_count", 0) if agent else 0
+        code_search_tool_output_chars = getattr(agent, "code_search_tool_output_chars", 0) if agent else 0
         blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
         inspected_files = sorted(getattr(agent, "inspected_files", set())) if agent else []
+        code_search_index_status_counts = dict(getattr(agent, "code_search_index_status_counts", {})) if agent else {}
+        code_search_last_index_status = getattr(agent, "code_search_last_index_status", None) if agent else None
+        code_search_last_index_reason = getattr(agent, "code_search_last_index_reason", None) if agent else None
+        code_search_last_index_dir = getattr(agent, "code_search_last_index_dir", None) if agent else None
         radar_index_status_counts = dict(getattr(agent, "radar_index_status_counts", {})) if agent else {}
         radar_last_index_status = getattr(agent, "radar_last_index_status", None) if agent else None
         radar_last_index_reason = getattr(agent, "radar_last_index_reason", None) if agent else None
@@ -1101,6 +1129,14 @@ def _process_instance(
         output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
         output_record["trace_tokens"] = billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0))
         output_record["billed_tokens"] = billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0))
+        if tool_backend == "code_search":
+            output_record["code_search_called"] = bool(code_search_called)
+            output_record["code_search_tool_calls"] = code_search_called
+            output_record["code_search_tool_output_chars"] = code_search_tool_output_chars
+            output_record["code_search_index_status_counts"] = code_search_index_status_counts
+            output_record["code_search_last_index_status"] = code_search_last_index_status
+            output_record["code_search_last_index_reason"] = code_search_last_index_reason
+            output_record["code_search_last_index_dir"] = code_search_last_index_dir
         if tool_backend == "file_radar_search":
             output_record["radar_called"] = bool(radar_called)
             output_record["radar_tool_calls"] = radar_called
@@ -1140,6 +1176,14 @@ def _process_instance(
             "correct": metrics.get("correct"),
             "tools_prompt": tools_prompt,
         }
+        if tool_backend == "code_search":
+            summary_record["code_search_called"] = bool(code_search_called)
+            summary_record["code_search_tool_calls"] = code_search_called
+            summary_record["code_search_tool_output_chars"] = code_search_tool_output_chars
+            summary_record["code_search_index_status_counts"] = code_search_index_status_counts
+            summary_record["code_search_last_index_status"] = code_search_last_index_status
+            summary_record["code_search_last_index_reason"] = code_search_last_index_reason
+            summary_record["code_search_last_index_dir"] = code_search_last_index_dir
         if tool_backend == "file_radar_search":
             summary_record["radar_called"] = bool(radar_called)
             summary_record["radar_tool_calls"] = radar_called

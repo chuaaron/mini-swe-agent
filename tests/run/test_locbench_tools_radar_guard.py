@@ -7,6 +7,7 @@ from minisweagent.agents.tool_agent import FormatError, Submitted
 from minisweagent.locbench.runners.tools_runner import ProgressTrackingAgent
 from minisweagent.models.test_models import DeterministicModel
 from minisweagent.environments.local import LocalEnvironment
+from minisweagent.tools.base import ToolResult
 from minisweagent.tools.registry import ToolRegistry
 
 
@@ -91,3 +92,43 @@ def test_strict_recovery_mode_after_repeated_interceptions():
         }
     )
     assert action["type"] == "bash"
+
+
+def test_code_search_index_diagnostics_are_tracked():
+    class _StubCodeSearchTool:
+        name = "code_search"
+        description = "stub"
+
+        def run(self, _args: dict, _context: dict) -> ToolResult:
+            return ToolResult(
+                success=True,
+                output="ok",
+                data={
+                    "index_status": "disk_hit",
+                    "index_compat_reason": "ok",
+                    "index_dir": "/tmp/index-dir",
+                },
+                returncode=0,
+            )
+
+    registry = ToolRegistry()
+    registry.register(_StubCodeSearchTool())
+    agent = ProgressTrackingAgent(
+        model=DeterministicModel(outputs=[]),
+        env=LocalEnvironment(),
+        tool_registry=registry,
+        progress_manager=_NoopProgress(),
+        instance_id="test-instance",
+        enforce_tool_verification=False,
+        **_load_agent_config(),
+    )
+
+    result = agent.execute_tool({"raw": "@tool code_search --query token"})
+
+    assert result["returncode"] == 0
+    assert agent.code_search_called_count == 1
+    assert agent.code_search_tool_output_chars == 2
+    assert agent.code_search_index_status_counts == {"disk_hit": 1}
+    assert agent.code_search_last_index_status == "disk_hit"
+    assert agent.code_search_last_index_reason == "ok"
+    assert agent.code_search_last_index_dir == "/tmp/index-dir"
