@@ -132,3 +132,14 @@ def test_code_search_index_diagnostics_are_tracked():
     assert agent.code_search_last_index_status == "disk_hit"
     assert agent.code_search_last_index_reason == "ok"
     assert agent.code_search_last_index_dir == "/tmp/index-dir"
+
+
+def test_parse_action_duplicate_identical_blocks_are_tolerated():
+    agent = _build_agent()
+
+    action = agent.parse_action(
+        {"content": "```bash\nsed -n '1,40p' pkg/a.py\n```\n```bash\nsed -n '1,40p' pkg/a.py\n```"}
+    )
+
+    assert action["type"] == "bash"
+    assert action["command"] == "sed -n '1,40p' pkg/a.py"

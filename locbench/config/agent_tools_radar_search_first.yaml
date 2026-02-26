@@ -30,6 +30,16 @@ agent:
     - @tool file_radar_search --query "handle user authentication" --topk-files 20
     - @tool file_radar_search --query "database connection pool" --filters "lang:python path:src/"
 
+    ### @tool list_symbols --file "<path>" [--include-signature]
+    File skeleton extraction for one candidate file.
+    Returns only imports/includes and symbol list with line ranges. No code body text.
+    Use it after radar to choose which region to read with sed/cat.
+    This tool is restricted to current radar candidate files.
+
+    Examples:
+    - @tool list_symbols --file "src/auth.py"
+    - @tool list_symbols --file "src/auth.py" --include-signature
+
     ### Bash commands
     You can also use standard bash commands directly:
     - rg: exact text search (Preferred over find)
@@ -82,6 +92,8 @@ agent:
     - Read-only work: do not modify files.
     - MUST start with file_radar_search unless the task provides exact file paths.
     - Do NOT start with bash exploration before file_radar_search.
+    - After file_radar_search, you may use list_symbols on candidate files to inspect structure before deep reading.
+    - list_symbols does NOT replace bash verification. You still need at least one bash read on a candidate file.
     - After file_radar_search, you MUST inspect at least one returned candidate file via bash before final output.
     - Do not run tests.
     - File paths must be relative to the repo root (no leading slash).

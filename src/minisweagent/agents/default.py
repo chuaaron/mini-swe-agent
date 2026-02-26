@@ -47,6 +47,10 @@ class LimitsExceeded(TerminatingException):
     """Raised when the agent has reached its cost or step limit."""
 
 
+def _normalize_action_block(action: str) -> str:
+    return action.replace("\r\n", "\n").strip()
+
+
 class DefaultAgent:
     def __init__(self, model: Model, env: Environment, *, config_class: type = AgentConfig, **kwargs):
         self.config = config_class(**kwargs)
@@ -110,8 +114,10 @@ class DefaultAgent:
     def parse_action(self, response: dict) -> dict:
         """Parse the action from the message. Returns the action."""
         actions = re.findall(self.config.action_regex, response["content"], re.DOTALL)
-        if len(actions) == 1:
-            return {"action": actions[0].strip(), **response}
+        normalized_actions = [_normalize_action_block(action) for action in actions]
+        unique_actions = list(dict.fromkeys(normalized_actions))
+        if len(unique_actions) == 1:
+            return {"action": unique_actions[0], **response}
         raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
 
     def execute_action(self, action: dict) -> dict:

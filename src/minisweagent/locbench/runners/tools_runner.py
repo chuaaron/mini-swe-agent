@@ -50,6 +50,7 @@ from minisweagent.locbench.utils import (
 )
 from minisweagent.tools.code_search import CodeSearchTool
 from minisweagent.tools.file_radar_search import FileRadarSearchTool
+from minisweagent.tools.list_symbols import ListSymbolsTool
 from minisweagent.tools.registry import ToolRegistry, ToolRegistryError
 from minisweagent.utils.log import add_file_handler, logger
 
@@ -507,7 +508,10 @@ class ProgressTrackingAgent(ToolAgent):
 
     def execute_tool(self, action: dict) -> dict:
         try:
-            result = self.tool_registry.execute(action["raw"], context=self.extra_template_vars)
+            context = dict(self.extra_template_vars)
+            if self.candidate_files:
+                context["allowed_files"] = sorted(self.candidate_files)
+            result = self.tool_registry.execute(action["raw"], context=context)
         except ToolRegistryError as exc:
             available = self.tool_registry.available_tools()
             raise ToolFormatError(
@@ -1282,12 +1286,13 @@ def run_tools(
         if embedding_device:
             tool_config["embedding_device"] = embedding_device
         if tool_backend == "code_search":
-            tool = CodeSearchTool(tool_config)
+            tool_registry.register(CodeSearchTool(tool_config))
         elif tool_backend == "file_radar_search":
-            tool = FileRadarSearchTool(tool_config)
+            max_file_size = int(tool_config.get("max_file_size", 512 * 1024))
+            tool_registry.register(FileRadarSearchTool(tool_config))
+            tool_registry.register(ListSymbolsTool({"max_file_size": max_file_size}))
         else:
             raise ValueError(f"Unsupported tool backend: {tool_backend}")
-        tool_registry.register(tool)
 
     default_output_dir = _default_output_dir(output_model_name, method)
     output_dir_path = Path(output_dir) if output_dir else default_output_dir

@@ -156,6 +156,18 @@ def test_parse_action_success(default_config):
     assert result["content"] == "Some text\n```bash\necho 'hello'\n```\nMore text"
 
 
+def test_parse_action_duplicate_identical_blocks_are_tolerated(default_config):
+    """Test parser tolerates duplicated identical actions from noisy model outputs."""
+    agent = DefaultAgent(
+        model=DeterministicModel(outputs=[]),
+        env=LocalEnvironment(),
+        **default_config,
+    )
+
+    result = agent.parse_action({"content": "```bash\necho 'same'\n```\n```bash\necho 'same'\n```"})
+    assert result["action"] == "echo 'same'"
+
+
 def test_parse_action_failures(default_config):
     """Test action parsing raises appropriate exceptions for invalid formats."""
     agent = DefaultAgent(

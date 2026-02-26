@@ -2,7 +2,7 @@
 
 本文档用于运行你最新落地的 Radar 方案：
 - 独立模式：`tools_radar`
-- 独立工具：`file_radar_search`
+- 独立工具：`file_radar_search` + `list_symbols`
 - 强制约束：调用 Radar 后，至少读取 1 个候选文件才能提交
 
 ---
@@ -10,14 +10,17 @@
 ## 1. 你现在新增了什么
 
 1. 新模式：`--mode tools_radar`
-2. 新工具：`@tool file_radar_search`
+2. 新工具：
+   - `@tool file_radar_search`（文件候选召回）
+   - `@tool list_symbols`（候选文件骨架提取，不返回正文）
 3. 新工具配置：`locbench/config/file_radar_search.yaml`
-4. 新提示词模板：
+4. 新提示词模板（已写入 list_symbols 使用规则）：
    - `locbench/config/agent_tools_radar_neutral.yaml`
    - `locbench/config/agent_tools_radar_search_first.yaml`
    - `locbench/config/agent_tools_radar_search_fallback.yaml`
-5. 新别名命令：`mini-extra locbench-tools-radar`
-6. 新设计文档：`locbench/docs/locbench_radar_sniper_design_doc.md`
+5. 新增轨迹分析脚本：`minisweagent.locbench.analysis.list_symbols_metrics`
+6. 新别名命令：`mini-extra locbench-tools-radar`
+7. 新设计文档：`locbench/docs/locbench_radar_sniper_design_doc.md`
 
 ---
 
@@ -82,6 +85,20 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
   --skip-missing \
   --redo-existing
 ```
+
+---
+
+## 4.1 Radar + Skeleton 推荐执行链路
+
+1. `@tool file_radar_search --query "..."`
+2. `@tool list_symbols --file "candidate.py" --include-signature`（可选）
+3. `sed/rg/cat` 精读候选文件
+4. 输出最终定位 JSON
+
+说明：
+1. `list_symbols` 只返回 `imports/includes` 与 `symbols(name/kind/start/end/signature?)`
+2. `list_symbols` 仅允许查询 Radar 候选文件（`allowed_files` 约束）
+3. `list_symbols` 不替代 bash 验证；提交前仍需 bash 读取候选文件
 
 ---
 
@@ -202,3 +219,30 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
 2. `search_first` 与 `search_fallback` 各跑同一批样本
 3. 固定 seed 做 `tools` vs `tools_radar` A/B
 4. 重点看 `verification_compliance_rate` 与 `pass_rate` 是否同步改善
+
+---
+
+## 12. list_symbols 轨迹分析（使用率/命中率/准确率增益）
+
+运行完成后，可直接基于 `trajectories/*.traj.json` 自动统计：
+1. `list_symbols_usage_rate`
+2. `list_symbols_hit_rate`（调用文件命中 GT 文件）
+3. `accuracy_uplift`（使用 vs 未使用 的正确率差）
+
+命令：
+```bash
+PYTHONPATH=src python -m minisweagent.locbench.analysis.list_symbols_metrics \
+  --run-dir locbench/outputs/<model>/<method>/<timestamp> \
+  --dataset data/Loc-Bench_V1_dataset.jsonl
+```
+
+产物：
+1. `<run-dir>/list_symbols_metrics.json`
+2. `<run-dir>/list_symbols_instance_metrics.csv`
+
+核心指标：
+1. `list_symbols_usage_rate_all`
+2. `list_symbols_usage_rate_given_radar`
+3. `list_symbols_call_hit_rate`
+4. `list_symbols_instance_hit_rate_given_used`
+5. `accuracy_uplift_used_vs_not_used_given_radar_pp`

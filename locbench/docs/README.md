@@ -30,3 +30,7 @@
 ## 5. 问题诊断
 
 1. Agent 索引问题总结（2026-02-25）：`locbench/docs/locbench_agent_index_issues_20260225.md`
+
+## 6. 变更留痕
+
+1. Radar + list_symbols + 轨迹指标分析（2026-02-26）：`locbench/docs/locbench_radar_symbols_changes_20260226.md`

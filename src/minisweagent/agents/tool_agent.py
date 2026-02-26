@@ -59,6 +59,10 @@ class LimitsExceeded(TerminatingException):
     """Raised when the agent has reached its cost or step limit."""
 
 
+def _normalize_action_block(action: str) -> str:
+    return action.replace("\r\n", "\n").strip()
+
+
 class ToolAgent:
     def __init__(
         self,
@@ -127,9 +131,11 @@ class ToolAgent:
 
     def parse_action(self, response: dict) -> dict:
         actions = re.findall(self.config.action_regex, response["content"], re.DOTALL)
-        if len(actions) != 1:
+        normalized_actions = [_normalize_action_block(action) for action in actions]
+        unique_actions = list(dict.fromkeys(normalized_actions))
+        if len(unique_actions) != 1:
             raise FormatError(self.render_template(self.config.format_error_template, actions=actions))
-        cmd = actions[0].strip()
+        cmd = unique_actions[0]
         if cmd.startswith("@tool "):
             return {"type": "tool", "raw": cmd, **response}
         return {"type": "bash", "command": cmd, **response}
