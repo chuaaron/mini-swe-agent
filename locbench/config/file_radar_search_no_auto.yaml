@@ -22,7 +22,7 @@ index_build_policy: read_only
 
 # Top-N 自动骨架（不泄露正文）：
 # 在 file_radar_search 返回中自动附带前 N 个候选文件的 imports/symbols 摘要。
-auto_skeleton_enabled: true
+auto_skeleton_enabled: false
 auto_skeleton_topn: 3
 auto_skeleton_budget_chars: 4000
 auto_skeleton_max_imports_per_file: 6

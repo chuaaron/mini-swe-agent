@@ -14,6 +14,7 @@ from typing import Any
 
 from minisweagent.tools.base import ToolResult
 from minisweagent.tools.code_search.chunkers import Chunk, SlidingChunker
+from minisweagent.tools.list_symbols import ListSymbolsTool
 
 _INDEX_VERSION = "radar_v1"
 
@@ -100,6 +101,14 @@ class FileRadarSearchConfig:
     # auto: rebuild index on miss/incompatible
     # read_only: require compatible prebuilt index, never rebuild
     index_build_policy: str = "read_only"
+    # Auto attach compact skeleton for top-N radar candidates.
+    auto_skeleton_enabled: bool = True
+    auto_skeleton_topn: int = 3
+    auto_skeleton_budget_chars: int = 4000
+    auto_skeleton_max_imports_per_file: int = 6
+    auto_skeleton_max_symbols_per_file: int = 14
+    auto_skeleton_include_signature: bool = False
+    auto_skeleton_query_aware: bool = True
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "FileRadarSearchConfig":
@@ -275,9 +284,18 @@ class FileRadarSearchTool:
             raise ValueError("index_validation_mode must be one of: strict, static")
         if self.config.index_build_policy not in {"auto", "read_only"}:
             raise ValueError("index_build_policy must be one of: auto, read_only")
+        if not 0 <= int(self.config.auto_skeleton_topn) <= 20:
+            raise ValueError("auto_skeleton_topn must be between 0 and 20")
+        if not 0 <= int(self.config.auto_skeleton_budget_chars) <= 20000:
+            raise ValueError("auto_skeleton_budget_chars must be between 0 and 20000")
+        if not 0 <= int(self.config.auto_skeleton_max_imports_per_file) <= 200:
+            raise ValueError("auto_skeleton_max_imports_per_file must be between 0 and 200")
+        if not 0 <= int(self.config.auto_skeleton_max_symbols_per_file) <= 500:
+            raise ValueError("auto_skeleton_max_symbols_per_file must be between 0 and 500")
         self.index_root = Path(os.path.expanduser(self.config.index_root)).resolve()
         self.chunker = SlidingChunker(self.config.chunk_size, self.config.overlap)
         self.embedder = self._build_embedder()
+        self.list_symbols_tool = ListSymbolsTool({"max_file_size": self.config.max_file_size})
         self._index_cache: dict[tuple[Path, str], FileRadarIndex] = {}
         self._lock = threading.Lock()
 
@@ -317,7 +335,8 @@ class FileRadarSearchTool:
                 repo_root = repo_path.resolve()
                 existing_only = [item for item in ranked if self._candidate_exists(repo_root, item["path"])]
                 structured = existing_only[: parsed.topk_files]
-                formatted = self._format_results(parsed.query, structured)
+                auto_skeleton = self._build_auto_skeleton(query=parsed.query, repo_root=repo_root, results=structured)
+                formatted = self._format_results(parsed.query, structured, auto_skeleton=auto_skeleton)
 
                 data = {
                     "query": parsed.query,
@@ -334,6 +353,11 @@ class FileRadarSearchTool:
                     "index_dir": index_debug.get("index_dir"),
                     "index_validation_mode": self.config.index_validation_mode,
                     "index_build_policy": self.config.index_build_policy,
+                    "auto_skeleton_enabled": bool(auto_skeleton.get("enabled")),
+                    "auto_skeleton_topn": int(auto_skeleton.get("topn", 0)),
+                    "auto_skeleton_budget_chars": int(auto_skeleton.get("budget_chars", 0)),
+                    "auto_skeleton_truncated": bool(auto_skeleton.get("truncated", False)),
+                    "auto_skeleton_files": auto_skeleton.get("files", []),
                 }
                 return ToolResult(success=True, data=data, output=formatted, returncode=0)
         except ValueError:
@@ -395,13 +419,233 @@ class FileRadarSearchTool:
         ranked.sort(key=lambda item: (item["score"], item["evidence_count"]), reverse=True)
         return ranked
 
-    def _format_results(self, query: str, results: list[dict[str, Any]]) -> str:
+    def _format_results(self, query: str, results: list[dict[str, Any]], *, auto_skeleton: dict[str, Any]) -> str:
         lines = [f'Found {len(results)} candidate files for "{query}":', ""]
         for idx, item in enumerate(results, start=1):
             lines.append(
                 f"{idx}. {item['path']} (score: {item['score']:.2f}, evidence: {item['evidence_count']})"
             )
+
+        files = auto_skeleton.get("files", [])
+        if auto_skeleton.get("enabled") and files:
+            lines.extend(["", f"Auto skeleton (Top-{len(files)}, compact, no code body):"])
+            for item in files:
+                lines.append(f"[{item['rank']}] {item['path']}")
+                imports_preview = item.get("imports_preview", "")
+                lines.append(f"imports: {imports_preview or '-'}")
+                symbols_preview = item.get("symbols_preview", "")
+                lines.append(f"symbols: {symbols_preview or '-'}")
+                query_hits = item.get("query_hits_preview", "")
+                if query_hits:
+                    lines.append(f"query_hits: {query_hits}")
+                extra_parts = []
+                if int(item.get("truncated_imports", 0)) > 0:
+                    extra_parts.append(f"imports+{item['truncated_imports']}")
+                if int(item.get("truncated_symbols", 0)) > 0:
+                    extra_parts.append(f"symbols+{item['truncated_symbols']}")
+                if extra_parts:
+                    lines.append(f"truncated: {', '.join(extra_parts)}")
+                if item.get("error"):
+                    lines.append(f"skeleton_error: {item['error']}")
+                lines.append("")
         return "\n".join(lines).strip()
+
+    def _build_auto_skeleton(
+        self,
+        *,
+        query: str,
+        repo_root: Path,
+        results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        topn = int(self.config.auto_skeleton_topn)
+        budget_chars = int(self.config.auto_skeleton_budget_chars)
+        if not self.config.auto_skeleton_enabled or topn <= 0 or budget_chars <= 0:
+            return {
+                "enabled": bool(self.config.auto_skeleton_enabled),
+                "topn": topn,
+                "budget_chars": budget_chars,
+                "files": [],
+                "truncated": False,
+            }
+
+        selected = results[:topn]
+        if not selected:
+            return {
+                "enabled": True,
+                "topn": topn,
+                "budget_chars": budget_chars,
+                "files": [],
+                "truncated": False,
+            }
+
+        query_tokens = self._query_tokens(query) if self.config.auto_skeleton_query_aware else set()
+        budgets = self._allocate_auto_skeleton_budgets(len(selected), budget_chars)
+        files: list[dict[str, Any]] = []
+        any_truncated = False
+
+        raw_import_limit = max(int(self.config.auto_skeleton_max_imports_per_file) * 2, 10)
+        raw_symbol_limit = max(int(self.config.auto_skeleton_max_symbols_per_file) * 3, 30)
+        for idx, (candidate, item_budget) in enumerate(zip(selected, budgets), start=1):
+            path = str(candidate.get("path") or "").strip()
+            base = {
+                "rank": idx,
+                "path": path,
+                "score": float(candidate.get("score", 0.0) or 0.0),
+                "evidence_count": int(candidate.get("evidence_count", 0) or 0),
+                "budget_chars": int(item_budget),
+                "imports_preview": "",
+                "symbols_preview": "",
+                "query_hits_preview": "",
+                "truncated_imports": 0,
+                "truncated_symbols": 0,
+                "import_count": 0,
+                "symbol_count": 0,
+                "error": "",
+            }
+            if not path:
+                base["error"] = "empty_path"
+                files.append(base)
+                continue
+
+            skeleton = self.list_symbols_tool.run(
+                {
+                    "file": path,
+                    "include-signature": bool(self.config.auto_skeleton_include_signature),
+                    "max-imports": raw_import_limit,
+                    "max-symbols": raw_symbol_limit,
+                },
+                {"repo_path": str(repo_root), "allowed_files": [path]},
+            )
+            if not skeleton.success:
+                base["error"] = str(skeleton.error or skeleton.output)
+                files.append(base)
+                continue
+
+            data = skeleton.data if isinstance(skeleton.data, dict) else {}
+            imports = [str(item.get("text") or "").strip() for item in data.get("imports", []) if item.get("text")]
+            symbols = [item for item in data.get("symbols", []) if isinstance(item, dict) and item.get("name")]
+            base["import_count"] = len(imports)
+            base["symbol_count"] = len(symbols)
+
+            if query_tokens:
+                symbols.sort(key=lambda item: self._symbol_rank_key(item, query_tokens), reverse=True)
+
+            import_limit = int(self.config.auto_skeleton_max_imports_per_file)
+            symbol_limit = int(self.config.auto_skeleton_max_symbols_per_file)
+            trimmed_imports = imports[:import_limit]
+            trimmed_symbols = symbols[:symbol_limit]
+            import_items = [self._clean_preview_text(text) for text in trimmed_imports]
+            symbol_items = [self._format_symbol_preview(symbol) for symbol in trimmed_symbols]
+
+            import_budget = max(60, int(item_budget * 0.35))
+            symbol_budget = max(80, item_budget - import_budget)
+            import_preview, used_imports = self._join_with_budget(import_items, import_budget)
+            symbol_preview, used_symbols = self._join_with_budget(symbol_items, symbol_budget)
+            truncated_imports = max(0, len(import_items) - used_imports) + max(0, len(imports) - len(trimmed_imports))
+            truncated_symbols = max(0, len(symbol_items) - used_symbols) + max(0, len(symbols) - len(trimmed_symbols))
+            any_truncated = any_truncated or bool(truncated_imports or truncated_symbols)
+
+            query_hits = self._query_hits(symbols, query_tokens) if query_tokens else []
+            query_hits_preview, _ = self._join_with_budget(query_hits, max(40, int(item_budget * 0.25)))
+
+            base["imports_preview"] = import_preview
+            base["symbols_preview"] = symbol_preview
+            base["query_hits_preview"] = query_hits_preview
+            base["truncated_imports"] = truncated_imports
+            base["truncated_symbols"] = truncated_symbols
+            files.append(base)
+
+        return {
+            "enabled": True,
+            "topn": topn,
+            "budget_chars": budget_chars,
+            "files": files,
+            "truncated": any_truncated,
+        }
+
+    def _allocate_auto_skeleton_budgets(self, n_files: int, total_budget: int) -> list[int]:
+        if n_files <= 0:
+            return []
+        if n_files == 1:
+            return [total_budget]
+        if n_files == 2:
+            first = int(total_budget * 0.6)
+            return [first, total_budget - first]
+
+        if n_files == 3:
+            first = int(total_budget * 0.5)
+            second = int(total_budget * 0.3)
+            return [first, second, total_budget - first - second]
+
+        # Keep top-3 priority, distribute the remainder uniformly.
+        first = int(total_budget * 0.5)
+        second = int(total_budget * 0.3)
+        third = int(total_budget * 0.15)
+        remaining = max(0, total_budget - first - second - third)
+        tail_count = n_files - 3
+        per_tail = remaining // tail_count if tail_count else 0
+        budgets = [first, second, third] + [per_tail] * tail_count
+        diff = total_budget - sum(budgets)
+        if diff:
+            budgets[-1] += diff
+        return budgets
+
+    def _query_tokens(self, query: str) -> set[str]:
+        return {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{1,}", query)}
+
+    def _symbol_rank_key(self, symbol: dict[str, Any], query_tokens: set[str]) -> tuple[int, int, int]:
+        name = str(symbol.get("name") or "")
+        lowered_name = name.lower()
+        overlap = sum(1 for token in query_tokens if token in lowered_name)
+        kind = str(symbol.get("kind") or "")
+        kind_priority = {"class": 4, "function": 3, "method": 2}.get(kind, 1)
+        span = max(0, int(symbol.get("end", 0) or 0) - int(symbol.get("start", 0) or 0))
+        return overlap, kind_priority, span
+
+    def _format_symbol_preview(self, symbol: dict[str, Any]) -> str:
+        name = self._clean_preview_text(str(symbol.get("name") or ""))
+        kind = self._clean_preview_text(str(symbol.get("kind") or "symbol"))
+        start = int(symbol.get("start", 0) or 0)
+        end = int(symbol.get("end", 0) or 0)
+        base = f"{name}({kind})[L{start}-L{end}]"
+        if self.config.auto_skeleton_include_signature:
+            signature = self._clean_preview_text(str(symbol.get("signature") or ""))
+            if signature:
+                base = f"{base}:{signature}"
+        return base
+
+    def _query_hits(self, symbols: list[dict[str, Any]], query_tokens: set[str]) -> list[str]:
+        if not query_tokens:
+            return []
+        hits: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols:
+            name = str(symbol.get("name") or "")
+            lowered = name.lower()
+            if any(token in lowered for token in query_tokens):
+                cleaned = self._clean_preview_text(name)
+                if cleaned and cleaned not in seen:
+                    seen.add(cleaned)
+                    hits.append(cleaned)
+        return hits
+
+    def _join_with_budget(self, items: list[str], budget_chars: int) -> tuple[str, int]:
+        if budget_chars <= 0 or not items:
+            return "", 0
+        selected: list[str] = []
+        current = 0
+        for item in items:
+            if not item:
+                continue
+            extra = len(item) + (2 if selected else 0)
+            if current + extra > budget_chars:
+                break
+            selected.append(item)
+            current += extra
+        return ", ".join(selected), len(selected)
+
+    def _clean_preview_text(self, text: str) -> str:
+        return " ".join(text.split())
 
     def _candidate_exists(self, repo_root: Path, relative_path: str) -> bool:
         if not relative_path:

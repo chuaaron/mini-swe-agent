@@ -3,6 +3,7 @@
 本文档用于运行你最新落地的 Radar 方案：
 - 独立模式：`tools_radar`
 - 独立工具：`file_radar_search` + `list_symbols`
+- `file_radar_search` 内置 `Top-N` 自动骨架摘要（默认 Top-3）
 - 强制约束：调用 Radar 后，至少读取 1 个候选文件才能提交
 
 ---
@@ -13,7 +14,7 @@
 2. 新工具：
    - `@tool file_radar_search`（文件候选召回）
    - `@tool list_symbols`（候选文件骨架提取，不返回正文）
-3. 新工具配置：`locbench/config/file_radar_search.yaml`
+3. 新工具配置：`locbench/config/file_radar_search.yaml`（含 Top-3 自动骨架参数）
 4. 新提示词模板（已写入 list_symbols 使用规则）：
    - `locbench/config/agent_tools_radar_neutral.yaml`
    - `locbench/config/agent_tools_radar_search_first.yaml`
@@ -91,14 +92,42 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
 ## 4.1 Radar + Skeleton 推荐执行链路
 
 1. `@tool file_radar_search --query "..."`
-2. `@tool list_symbols --file "candidate.py" --include-signature`（可选）
-3. `sed/rg/cat` 精读候选文件
-4. 输出最终定位 JSON
+2. （自动）从 Radar Top-N 候选中附带 compact skeleton（imports + symbols）
+3. `@tool list_symbols --file "candidate.py" --include-signature`（可选，手动深挖）
+4. `sed/rg/cat` 精读候选文件
+5. 输出最终定位 JSON
 
 说明：
 1. `list_symbols` 只返回 `imports/includes` 与 `symbols(name/kind/start/end/signature?)`
 2. `list_symbols` 仅允许查询 Radar 候选文件（`allowed_files` 约束）
 3. `list_symbols` 不替代 bash 验证；提交前仍需 bash 读取候选文件
+
+---
+
+## 4.2 Top-3 自动骨架（Auto Skeleton）
+
+`file_radar_search` 的返回现在默认包含：
+1. 候选文件列表（path/score/evidence）
+2. `Auto skeleton (Top-N, compact, no code body)` 段
+
+自动骨架内容：
+1. `imports` 摘要（压缩展示）
+2. `symbols` 摘要（`name(kind)[Lstart-Lend]`）
+3. `query_hits`（符号名与 query token 的重合）
+4. `truncated` 标记（预算截断时展示）
+
+预算与开关配置（`locbench/config/file_radar_search.yaml`）：
+1. `auto_skeleton_enabled`
+2. `auto_skeleton_topn`
+3. `auto_skeleton_budget_chars`
+4. `auto_skeleton_max_imports_per_file`
+5. `auto_skeleton_max_symbols_per_file`
+6. `auto_skeleton_include_signature`
+7. `auto_skeleton_query_aware`
+
+建议：
+1. 默认保持 `topn=3`、`budget_chars=4000`
+2. 若模型 token 压力大，可降到 `budget_chars=2500`
 
 ---
 
@@ -142,11 +171,17 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
 5. `radar_candidate_files`
 6. `radar_verified_files`
 7. `radar_verification_satisfied`
+8. `auto_skeleton_enabled`
+9. `auto_skeleton_topn`
+10. `auto_skeleton_budget_chars`
+11. `auto_skeleton_truncated`
+12. `auto_skeleton_files`
 
 解释：
 1. `radar_called`: 本样本是否调用过 `file_radar_search`
 2. `blocked_submission_count`: 因未验证候选文件而被拦截提交的次数
 3. `radar_verification_satisfied`: 是否完成“至少 1 个候选文件读取验证”
+4. `auto_skeleton_files`: Radar 自动附带的骨架摘要（每个文件的 imports/symbols 预览与截断信息）
 
 ---
 
@@ -246,3 +281,64 @@ PYTHONPATH=src python -m minisweagent.locbench.analysis.list_symbols_metrics \
 3. `list_symbols_call_hit_rate`
 4. `list_symbols_instance_hit_rate_given_used`
 5. `accuracy_uplift_used_vs_not_used_given_radar_pp`
+
+---
+
+## 13. Auto Skeleton A/B（可直接复制）
+
+目标：只改 `auto_skeleton_enabled`，其余条件保持一致，做 `tools_radar + neutral` 对照。
+
+### 13.1 准备两份 tool config
+
+```bash
+cd /Users/chz/code/locbench/mini-swe-agent
+
+cp locbench/config/file_radar_search.yaml locbench/config/file_radar_search_auto.yaml
+cp locbench/config/file_radar_search.yaml locbench/config/file_radar_search_no_auto.yaml
+
+python - <<'PY'
+from pathlib import Path
+p = Path("locbench/config/file_radar_search_no_auto.yaml")
+s = p.read_text(encoding="utf-8")
+s = s.replace("auto_skeleton_enabled: true", "auto_skeleton_enabled: false")
+p.write_text(s, encoding="utf-8")
+print("updated", p)
+PY
+```
+
+### 13.2 对照组（关闭自动骨架）
+
+```bash
+PYTHONPATH=src python -m minisweagent.run_locbench \
+  --mode tools_radar \
+  --tools-prompt neutral \
+  --tool-config locbench/config/file_radar_search_no_auto.yaml \
+  --method miniswe_tools_radar__neutral__no_auto_skeleton \
+  --slice 0:560 \
+  --shuffle --shuffle-seed 123 \
+  --workers 4 \
+  --skip-missing \
+  --redo-existing
+```
+
+### 13.3 实验组（开启 Top-3 自动骨架）
+
+```bash
+PYTHONPATH=src python -m minisweagent.run_locbench \
+  --mode tools_radar \
+  --tools-prompt neutral \
+  --tool-config locbench/config/file_radar_search_auto.yaml \
+  --method miniswe_tools_radar__neutral__auto_skeleton_top3 \
+  --slice 0:560 \
+  --shuffle --shuffle-seed 123 \
+  --workers 4 \
+  --skip-missing \
+  --redo-existing
+```
+
+### 13.4 快速验证自动骨架是否生效
+
+```bash
+rg -n "Auto skeleton \\(Top-" \
+  locbench/outputs/*/miniswe_tools_radar__neutral__auto_skeleton_top3/*/trajectories/*.traj.json | head
+```

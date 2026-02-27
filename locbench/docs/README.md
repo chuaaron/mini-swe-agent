@@ -34,3 +34,4 @@
 ## 6. 变更留痕
 
 1. Radar + list_symbols + 轨迹指标分析（2026-02-26）：`locbench/docs/locbench_radar_symbols_changes_20260226.md`
+2. Radar Top-N 自动骨架（2026-02-27）：`locbench/docs/locbench_radar_auto_skeleton_changes_20260227.md`

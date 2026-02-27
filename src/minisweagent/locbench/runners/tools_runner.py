@@ -116,6 +116,11 @@ class ProgressTrackingAgent(ToolAgent):
         self.radar_last_index_status: str | None = None
         self.radar_last_index_reason: str | None = None
         self.radar_last_index_dir: str | None = None
+        self.radar_auto_skeleton_enabled: bool | None = None
+        self.radar_auto_skeleton_topn: int | None = None
+        self.radar_auto_skeleton_budget_chars: int | None = None
+        self.radar_auto_skeleton_truncated: bool | None = None
+        self.radar_auto_skeleton_files: list[dict[str, Any]] = []
         self._verification_interception_streak = 0
         self._strict_recovery_mode = False
 
@@ -561,6 +566,21 @@ class ProgressTrackingAgent(ToolAgent):
                 index_dir = str(result.data.get("index_dir") or "").strip()
                 if index_dir:
                     self.radar_last_index_dir = index_dir
+                auto_skeleton_enabled = result.data.get("auto_skeleton_enabled")
+                if auto_skeleton_enabled is not None:
+                    self.radar_auto_skeleton_enabled = bool(auto_skeleton_enabled)
+                auto_skeleton_topn = result.data.get("auto_skeleton_topn")
+                if auto_skeleton_topn is not None:
+                    self.radar_auto_skeleton_topn = int(auto_skeleton_topn)
+                auto_skeleton_budget_chars = result.data.get("auto_skeleton_budget_chars")
+                if auto_skeleton_budget_chars is not None:
+                    self.radar_auto_skeleton_budget_chars = int(auto_skeleton_budget_chars)
+                auto_skeleton_truncated = result.data.get("auto_skeleton_truncated")
+                if auto_skeleton_truncated is not None:
+                    self.radar_auto_skeleton_truncated = bool(auto_skeleton_truncated)
+                auto_skeleton_files = result.data.get("auto_skeleton_files")
+                if isinstance(auto_skeleton_files, list):
+                    self.radar_auto_skeleton_files = auto_skeleton_files
             candidate_files: set[str] = set()
             for item in result.data.get("results", []) if isinstance(result.data, dict) else []:
                 path = item.get("path")
@@ -1115,6 +1135,11 @@ def _process_instance(
         radar_last_index_status = getattr(agent, "radar_last_index_status", None) if agent else None
         radar_last_index_reason = getattr(agent, "radar_last_index_reason", None) if agent else None
         radar_last_index_dir = getattr(agent, "radar_last_index_dir", None) if agent else None
+        radar_auto_skeleton_enabled = getattr(agent, "radar_auto_skeleton_enabled", None) if agent else None
+        radar_auto_skeleton_topn = getattr(agent, "radar_auto_skeleton_topn", None) if agent else None
+        radar_auto_skeleton_budget_chars = getattr(agent, "radar_auto_skeleton_budget_chars", None) if agent else None
+        radar_auto_skeleton_truncated = getattr(agent, "radar_auto_skeleton_truncated", None) if agent else None
+        radar_auto_skeleton_files = list(getattr(agent, "radar_auto_skeleton_files", [])) if agent else []
         oracle_files = list(instance.get("oracle_files") or [])
         oracle_primary_file = str(instance.get("oracle_primary_file") or "")
         oracle_file_provided = bool(oracle_files)
@@ -1154,6 +1179,11 @@ def _process_instance(
             output_record["radar_last_index_status"] = radar_last_index_status
             output_record["radar_last_index_reason"] = radar_last_index_reason
             output_record["radar_last_index_dir"] = radar_last_index_dir
+            output_record["auto_skeleton_enabled"] = radar_auto_skeleton_enabled
+            output_record["auto_skeleton_topn"] = radar_auto_skeleton_topn
+            output_record["auto_skeleton_budget_chars"] = radar_auto_skeleton_budget_chars
+            output_record["auto_skeleton_truncated"] = radar_auto_skeleton_truncated
+            output_record["auto_skeleton_files"] = radar_auto_skeleton_files
             output_record["oracle_sniper_mode"] = oracle_sniper_mode
             output_record["oracle_file_provided"] = oracle_file_provided
             output_record["oracle_file_count"] = len(oracle_files)
@@ -1198,6 +1228,10 @@ def _process_instance(
             summary_record["radar_last_index_status"] = radar_last_index_status
             summary_record["radar_last_index_reason"] = radar_last_index_reason
             summary_record["radar_last_index_dir"] = radar_last_index_dir
+            summary_record["auto_skeleton_enabled"] = radar_auto_skeleton_enabled
+            summary_record["auto_skeleton_topn"] = radar_auto_skeleton_topn
+            summary_record["auto_skeleton_budget_chars"] = radar_auto_skeleton_budget_chars
+            summary_record["auto_skeleton_truncated"] = radar_auto_skeleton_truncated
             summary_record["oracle_sniper_mode"] = oracle_sniper_mode
             summary_record["oracle_file_provided"] = oracle_file_provided
             summary_record["oracle_file_count"] = len(oracle_files)
