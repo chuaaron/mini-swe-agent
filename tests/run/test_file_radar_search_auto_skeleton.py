@@ -57,7 +57,13 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
         ),
     )
 
-    tool = _build_tool(tmp_path, auto_skeleton_enabled=True, auto_skeleton_topn=3, auto_skeleton_budget_chars=3500)
+    tool = _build_tool(
+        tmp_path,
+        auto_skeleton_enabled=True,
+        auto_skeleton_topn=3,
+        auto_skeleton_budget_chars=3500,
+        auto_skeleton_max_imports_per_file=0,
+    )
     candidates = [
         {"path": "src/auth.py", "score": 0.93, "evidence_count": 8},
         {"path": "src/token_cache.py", "score": 0.82, "evidence_count": 5},
@@ -69,13 +75,16 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
     assert auto["topn"] == 3
     assert len(auto["files"]) == 3
     assert auto["files"][0]["path"] == "src/auth.py"
-    assert "AuthService" in auto["files"][0]["symbols_preview"]
+    assert "AuthService" in auto["files"][0]["matched_symbols_preview"]
 
     output = tool._format_results("auth token login", candidates, auto_skeleton=auto)
     assert "Auto skeleton (Top-3, compact, no code body):" in output
-    assert "imports:" in output
-    assert "symbols:" in output
-    assert "query_hits:" in output
+    assert "🎯 Matched Symbols:" in output
+    assert "📎 Other Context:" in output
+    assert "imports:" not in output
+    assert "💡 SYSTEM HINTS FOR NEXT STEP:" in output
+    assert "TARGET FOUND?" in output
+    assert "NOT FOUND?" in output
     assert "return bool(user)" not in output
 
 
@@ -102,7 +111,7 @@ def test_auto_skeleton_budget_truncates_output(tmp_path: Path):
         auto_skeleton_enabled=True,
         auto_skeleton_topn=1,
         auto_skeleton_budget_chars=120,
-        auto_skeleton_max_imports_per_file=20,
+        auto_skeleton_max_imports_per_file=0,
         auto_skeleton_max_symbols_per_file=20,
     )
     candidates = [{"path": "src/dense.py", "score": 0.99, "evidence_count": 12}]
@@ -111,7 +120,8 @@ def test_auto_skeleton_budget_truncates_output(tmp_path: Path):
     assert auto["enabled"] is True
     assert len(auto["files"]) == 1
     file_item = auto["files"][0]
-    assert file_item["truncated_imports"] > 0 or file_item["truncated_symbols"] > 0
+    assert file_item["truncated_imports"] == 0
+    assert file_item["truncated_symbols"] > 0
 
     output = tool._format_results("auth payload context", candidates, auto_skeleton=auto)
     assert "truncated:" in output

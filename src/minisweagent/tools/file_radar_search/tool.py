@@ -431,13 +431,13 @@ class FileRadarSearchTool:
             lines.extend(["", f"Auto skeleton (Top-{len(files)}, compact, no code body):"])
             for item in files:
                 lines.append(f"[{item['rank']}] {item['path']}")
-                imports_preview = item.get("imports_preview", "")
-                lines.append(f"imports: {imports_preview or '-'}")
-                symbols_preview = item.get("symbols_preview", "")
-                lines.append(f"symbols: {symbols_preview or '-'}")
-                query_hits = item.get("query_hits_preview", "")
-                if query_hits:
-                    lines.append(f"query_hits: {query_hits}")
+                if int(self.config.auto_skeleton_max_imports_per_file) > 0:
+                    imports_preview = item.get("imports_preview", "")
+                    lines.append(f"imports: {imports_preview or '-'}")
+                matched_symbols_preview = item.get("matched_symbols_preview", "")
+                lines.append(f"🎯 Matched Symbols: {matched_symbols_preview or '-'}")
+                other_symbols_preview = item.get("other_symbols_preview", "")
+                lines.append(f"📎 Other Context: {other_symbols_preview or '-'}")
                 extra_parts = []
                 if int(item.get("truncated_imports", 0)) > 0:
                     extra_parts.append(f"imports+{item['truncated_imports']}")
@@ -448,6 +448,17 @@ class FileRadarSearchTool:
                 if item.get("error"):
                     lines.append(f"skeleton_error: {item['error']}")
                 lines.append("")
+
+            lines.extend(
+                [
+                    "💡 SYSTEM HINTS FOR NEXT STEP:",
+                    "1. TARGET FOUND? If your target is in the symbols above, use `sed -n 'Lstart,Lend p' <path>` to read the exact code block.",
+                    (
+                        f"2. NOT FOUND? If the target is not in the Top-{len(files)} skeletons, DO NOT blind-search. "
+                        "Reformulate your query (use synonyms) and call `file_radar_search` again."
+                    ),
+                ]
+            )
         return "\n".join(lines).strip()
 
     def _build_auto_skeleton(
@@ -483,8 +494,10 @@ class FileRadarSearchTool:
         files: list[dict[str, Any]] = []
         any_truncated = False
 
-        raw_import_limit = max(int(self.config.auto_skeleton_max_imports_per_file) * 2, 10)
-        raw_symbol_limit = max(int(self.config.auto_skeleton_max_symbols_per_file) * 3, 30)
+        import_limit = max(0, int(self.config.auto_skeleton_max_imports_per_file))
+        symbol_limit = max(0, int(self.config.auto_skeleton_max_symbols_per_file))
+        raw_import_limit = import_limit * 2 if import_limit > 0 else 0
+        raw_symbol_limit = max(symbol_limit * 3, 30) if symbol_limit > 0 else 0
         for idx, (candidate, item_budget) in enumerate(zip(selected, budgets), start=1):
             path = str(candidate.get("path") or "").strip()
             base = {
@@ -494,6 +507,8 @@ class FileRadarSearchTool:
                 "evidence_count": int(candidate.get("evidence_count", 0) or 0),
                 "budget_chars": int(item_budget),
                 "imports_preview": "",
+                "matched_symbols_preview": "",
+                "other_symbols_preview": "",
                 "symbols_preview": "",
                 "query_hits_preview": "",
                 "truncated_imports": 0,
@@ -530,27 +545,61 @@ class FileRadarSearchTool:
             if query_tokens:
                 symbols.sort(key=lambda item: self._symbol_rank_key(item, query_tokens), reverse=True)
 
-            import_limit = int(self.config.auto_skeleton_max_imports_per_file)
-            symbol_limit = int(self.config.auto_skeleton_max_symbols_per_file)
-            trimmed_imports = imports[:import_limit]
-            trimmed_symbols = symbols[:symbol_limit]
-            import_items = [self._clean_preview_text(text) for text in trimmed_imports]
-            symbol_items = [self._format_symbol_preview(symbol) for symbol in trimmed_symbols]
+            trimmed_imports = imports[:import_limit] if import_limit > 0 else []
+            import_items = [self._clean_preview_text(text) for text in trimmed_imports] if import_limit > 0 else []
+            trimmed_symbols = symbols[:symbol_limit] if symbol_limit > 0 else []
+            symbol_entries = [
+                {
+                    "text": self._format_symbol_preview(symbol),
+                    "matched": self._is_symbol_match(symbol, query_tokens),
+                }
+                for symbol in trimmed_symbols
+            ]
 
-            import_budget = max(60, int(item_budget * 0.35))
-            symbol_budget = max(80, item_budget - import_budget)
+            if import_limit > 0:
+                import_budget = max(40, int(item_budget * 0.2))
+                symbol_budget = max(0, item_budget - import_budget)
+            else:
+                import_budget = 0
+                symbol_budget = item_budget
+
             import_preview, used_imports = self._join_with_budget(import_items, import_budget)
-            symbol_preview, used_symbols = self._join_with_budget(symbol_items, symbol_budget)
-            truncated_imports = max(0, len(import_items) - used_imports) + max(0, len(imports) - len(trimmed_imports))
-            truncated_symbols = max(0, len(symbol_items) - used_symbols) + max(0, len(symbols) - len(trimmed_symbols))
+            if query_tokens:
+                matched_items = [entry["text"] for entry in symbol_entries if entry["matched"]]
+                other_items = [entry["text"] for entry in symbol_entries if not entry["matched"]]
+            else:
+                matched_items = []
+                other_items = [entry["text"] for entry in symbol_entries]
+
+            if matched_items:
+                matched_budget = max(40, int(symbol_budget * 0.6))
+                other_budget = max(0, symbol_budget - matched_budget)
+            else:
+                matched_budget = 0
+                other_budget = symbol_budget
+
+            matched_symbols_preview, used_matched = self._join_with_budget(matched_items, matched_budget)
+            other_symbols_preview, used_other = self._join_with_budget(other_items, other_budget)
+            used_symbols = used_matched + used_other
+            truncated_imports = (
+                max(0, len(import_items) - used_imports) + max(0, len(imports) - len(trimmed_imports))
+                if import_limit > 0
+                else 0
+            )
+            truncated_symbols = (
+                max(0, len(symbol_entries) - used_symbols) + max(0, len(symbols) - len(trimmed_symbols))
+                if symbol_limit > 0
+                else 0
+            )
             any_truncated = any_truncated or bool(truncated_imports or truncated_symbols)
 
-            query_hits = self._query_hits(symbols, query_tokens) if query_tokens else []
-            query_hits_preview, _ = self._join_with_budget(query_hits, max(40, int(item_budget * 0.25)))
-
             base["imports_preview"] = import_preview
-            base["symbols_preview"] = symbol_preview
-            base["query_hits_preview"] = query_hits_preview
+            base["matched_symbols_preview"] = matched_symbols_preview
+            base["other_symbols_preview"] = other_symbols_preview
+            base["symbols_preview"] = ", ".join(
+                item for item in [matched_symbols_preview, other_symbols_preview] if item
+            )
+            base["query_hits_preview"] = matched_symbols_preview
             base["truncated_imports"] = truncated_imports
             base["truncated_symbols"] = truncated_symbols
             files.append(base)
@@ -602,6 +651,12 @@ class FileRadarSearchTool:
         span = max(0, int(symbol.get("end", 0) or 0) - int(symbol.get("start", 0) or 0))
         return overlap, kind_priority, span
 
+    def _is_symbol_match(self, symbol: dict[str, Any], query_tokens: set[str]) -> bool:
+        if not query_tokens:
+            return False
+        name = str(symbol.get("name") or "").lower()
+        return any(token in name for token in query_tokens)
+
     def _format_symbol_preview(self, symbol: dict[str, Any]) -> str:
         name = self._clean_preview_text(str(symbol.get("name") or ""))
         kind = self._clean_preview_text(str(symbol.get("kind") or "symbol"))
@@ -613,21 +668,6 @@ class FileRadarSearchTool:
             if signature:
                 base = f"{base}:{signature}"
         return base
-
-    def _query_hits(self, symbols: list[dict[str, Any]], query_tokens: set[str]) -> list[str]:
-        if not query_tokens:
-            return []
-        hits: list[str] = []
-        seen: set[str] = set()
-        for symbol in symbols:
-            name = str(symbol.get("name") or "")
-            lowered = name.lower()
-            if any(token in lowered for token in query_tokens):
-                cleaned = self._clean_preview_text(name)
-                if cleaned and cleaned not in seen:
-                    seen.add(cleaned)
-                    hits.append(cleaned)
-        return hits
 
     def _join_with_budget(self, items: list[str], budget_chars: int) -> tuple[str, int]:
         if budget_chars <= 0 or not items:

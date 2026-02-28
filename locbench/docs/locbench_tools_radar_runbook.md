@@ -111,10 +111,10 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
 2. `Auto skeleton (Top-N, compact, no code body)` 段
 
 自动骨架内容：
-1. `imports` 摘要（压缩展示）
-2. `symbols` 摘要（`name(kind)[Lstart-Lend]`）
-3. `query_hits`（符号名与 query token 的重合）
-4. `truncated` 标记（预算截断时展示）
+1. `🎯 Matched Symbols`（命中 query 的符号，置顶展示）
+2. `📎 Other Context`（其余符号上下文）
+3. `truncated` 标记（预算截断时展示）
+4. `💡 SYSTEM HINTS FOR NEXT STEP`（强提示下一步用法）
 
 预算与开关配置（`locbench/config/file_radar_search.yaml`）：
 1. `auto_skeleton_enabled`
@@ -128,6 +128,7 @@ PYTHONPATH=src python -m minisweagent.run_locbench \
 建议：
 1. 默认保持 `topn=3`、`budget_chars=4000`
 2. 若模型 token 压力大，可降到 `budget_chars=2500`
+3. 默认 `auto_skeleton_max_imports_per_file=0`，彻底去掉 imports 噪音
 
 ---
 

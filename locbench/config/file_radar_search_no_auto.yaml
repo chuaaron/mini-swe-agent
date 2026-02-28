@@ -25,7 +25,7 @@ index_build_policy: read_only
 auto_skeleton_enabled: false
 auto_skeleton_topn: 3
 auto_skeleton_budget_chars: 4000
-auto_skeleton_max_imports_per_file: 6
+auto_skeleton_max_imports_per_file: 0
 auto_skeleton_max_symbols_per_file: 14
 auto_skeleton_include_signature: false
 auto_skeleton_query_aware: true

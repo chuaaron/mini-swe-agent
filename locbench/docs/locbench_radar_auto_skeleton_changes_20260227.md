@@ -44,7 +44,12 @@
 实现细节：
 1. 自动骨架复用 `ListSymbolsTool` 解析文件结构，不返回代码正文。
 2. 预算分配默认偏向 Top-3：`50% / 30% / 20%`。
-3. 在 `query_aware=true` 时，符号按 query token overlap 排序后压缩输出。
+3. 在 `query_aware=true` 时，符号按 query token overlap 排序后压缩输出，并拆分为：
+   - `🎯 Matched Symbols`
+   - `📎 Other Context`
+4. 返回末尾追加强提示：
+   - `💡 SYSTEM HINTS FOR NEXT STEP`
+   - 指导 `sed -n 'Lstart,Lend p' <path>` 精读与重搜策略
 
 ---
 
@@ -57,7 +62,7 @@
 1. `auto_skeleton_enabled: true`
 2. `auto_skeleton_topn: 3`
 3. `auto_skeleton_budget_chars: 4000`
-4. `auto_skeleton_max_imports_per_file: 6`
+4. `auto_skeleton_max_imports_per_file: 0`
 5. `auto_skeleton_max_symbols_per_file: 14`
 6. `auto_skeleton_include_signature: false`
 7. `auto_skeleton_query_aware: true`
