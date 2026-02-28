@@ -46,6 +46,40 @@ def test_list_symbols_extracts_python_skeleton(tmp_path: Path):
     assert "return x + y" not in result.output
 
 
+def test_list_symbols_extracts_doc_first_sentence_for_python(tmp_path: Path):
+    repo = tmp_path / "repo"
+    source_file = repo / "src" / "stats.py"
+    _write_file(
+        source_file,
+        (
+            "def rankdata(values):\n"
+            "    \"\"\"Compute the rank of data along an array axis.\n\n"
+            "    This sentence should not be included in the first-sentence preview.\n"
+            "    \"\"\"\n"
+            "    return values\n\n"
+            "def long_doc():\n"
+            "    \"\"\"This sentence is intentionally very long so that it exceeds the configured doc preview "
+            "limit and must be hard-truncated to protect the radar context glimpse budget in output rendering.\"\"\"\n"
+            "    return None\n"
+        ),
+    )
+
+    tool = ListSymbolsTool()
+    result = tool.run(
+        {"file": "src/stats.py", "include-signature": False},
+        {"repo_path": str(repo), "allowed_files": ["src/stats.py"]},
+    )
+
+    assert result.success is True
+    symbols = {item["name"]: item for item in result.data["symbols"]}
+    assert symbols["rankdata"]["doc_first_sentence"] == "Compute the rank of data along an array axis."
+    long_doc = symbols["long_doc"]["doc_first_sentence"]
+    assert "\n" not in long_doc
+    assert "\r" not in long_doc
+    assert len(long_doc) <= 100
+    assert long_doc.endswith("...")
+
+
 def test_list_symbols_respects_allowed_files(tmp_path: Path):
     repo = tmp_path / "repo"
     _write_file(repo / "src" / "a.py", "def a():\n    return 1\n")

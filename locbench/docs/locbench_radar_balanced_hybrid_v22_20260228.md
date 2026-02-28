@@ -21,6 +21,8 @@
    - 不够再 `list_symbols`；
    - 仍不确定再重搜。
 5. 符号预览字符串加长度上限，抑制单条过长导致的输出膨胀。
+6. `🎯 Anchors` 与 `🧭 Context Glimpse` 改为多行 bullet 形态，提升可扫读性。
+7. `🧭 Context Glimpse` 预览优先带 `doc_first_sentence`（来自 `list_symbols`），形成“结构 + 语义”混合线索。
 
 ### 2.2 tools_runner：验证路径加入 list_symbols
 文件：`src/minisweagent/locbench/runners/tools_runner.py`
@@ -35,14 +37,27 @@
    - 可通过 bash 读取或 `@tool list_symbols` 满足验证。
 4. `file_hint` 提交校验改为接受“bash 已读 + list_symbols 已展开”的并集历史。
 
+### 2.3 list_symbols：Python Docstring 首句抽取（P0）
+文件：`src/minisweagent/tools/list_symbols/tool.py`
+
+主要变化：
+1. 在 Python AST 分支中，为 class/function/method 符号增加 `doc_first_sentence` 字段。
+2. 清洗规则（防脏数据）：
+   - 按首个空段落（`\n\n`）截断；
+   - 再按第一个句号 `.` 截断首句；
+   - 将换行折叠为空格，保证单行输出；
+   - 硬截断到 100 字符，超长追加 `...`。
+3. 当前为 Python-only（不引入 Tree-sitter 依赖），优先验证定位收益与 token 成本。
+
 ## 3. 回归测试
 ```bash
 PYTHONPATH=src pytest -q \
+  tests/run/test_list_symbols_tool.py \
   tests/run/test_file_radar_search_auto_skeleton.py \
   tests/run/test_locbench_tools_radar_guard.py
 ```
 
-当前结果：`6 passed`。
+当前结果：`12 passed`。
 
 ## 4. 32 题回归集运行命令
 

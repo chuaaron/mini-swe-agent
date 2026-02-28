@@ -431,14 +431,28 @@ class FileRadarSearchTool:
             lines.extend(["", f"Auto skeleton (Top-{len(files)}, balanced folded, no code body):"])
             for item in files:
                 lines.append(f"[{item['rank']}] {item['path']}")
-                anchors_preview = item.get("anchors_preview", "")
-                lines.append(f"🎯 Anchors: {anchors_preview or '-'}")
-                context_glimpse_preview = item.get("context_glimpse_preview", "")
-                lines.append(f"🧭 Context Glimpse: {context_glimpse_preview or '-'}")
+                lines.append("🎯 Anchors:")
+                anchor_items = item.get("anchors_items", [])
+                if isinstance(anchor_items, list) and anchor_items:
+                    for text in anchor_items:
+                        lines.append(f"    - {text}")
+                else:
+                    anchors_preview = item.get("anchors_preview", "")
+                    lines.append(f"    - {anchors_preview or '-'}")
+
+                lines.append("🧭 Context Glimpse:")
+                glimpse_items = item.get("context_glimpse_items", [])
+                if isinstance(glimpse_items, list) and glimpse_items:
+                    for text in glimpse_items:
+                        lines.append(f"    - {text}")
+                else:
+                    context_glimpse_preview = item.get("context_glimpse_preview", "")
+                    lines.append(f"    - {context_glimpse_preview or '-'}")
                 lines.append(
                     "📦 Folded: "
                     f"symbols={int(item.get('folded_symbols_count', 0))}, "
-                    f"imports={int(item.get('folded_imports_count', 0))}"
+                    f"imports={int(item.get('folded_imports_count', 0))} "
+                    f"(use `@tool list_symbols --file \"{item['path']}\"` to expand)"
                 )
                 primary_anchor = item.get("primary_anchor", {})
                 if isinstance(primary_anchor, dict) and primary_anchor.get("start") and primary_anchor.get("end"):
@@ -511,7 +525,9 @@ class FileRadarSearchTool:
                 "evidence_count": int(candidate.get("evidence_count", 0) or 0),
                 "budget_chars": int(budget_chars),
                 "anchors_preview": "",
+                "anchors_items": [],
                 "context_glimpse_preview": "",
+                "context_glimpse_items": [],
                 "query_hits_preview": "",
                 "primary_anchor": {},
                 "anchor_count": 0,
@@ -556,8 +572,9 @@ class FileRadarSearchTool:
                 matched_symbols = []
 
             anchors = matched_symbols[:anchor_limit]
-            anchor_texts = [self._format_symbol_preview(symbol) for symbol in anchors]
+            anchor_texts = [self._format_symbol_preview(symbol, include_doc=False) for symbol in anchors]
             base["anchors_preview"] = ", ".join(anchor_texts)
+            base["anchors_items"] = anchor_texts
             base["query_hits_preview"] = base["anchors_preview"]
             base["anchor_count"] = len(anchors)
             if anchors:
@@ -580,8 +597,9 @@ class FileRadarSearchTool:
                 query_tokens=query_tokens,
                 limit=context_limit,
             )
-            glimpse_texts = [self._format_symbol_preview(symbol) for symbol in glimpses]
+            glimpse_texts = [self._format_symbol_preview(symbol, include_doc=True) for symbol in glimpses]
             base["context_glimpse_preview"] = ", ".join(glimpse_texts)
+            base["context_glimpse_items"] = glimpse_texts
             base["context_glimpse_count"] = len(glimpses)
             base["folded_imports_count"] = len(imports)
             base["folded_symbols_count"] = max(0, len(symbols) - len(anchors) - len(glimpses))
@@ -709,7 +727,7 @@ class FileRadarSearchTool:
         name = str(symbol.get("name") or "").lower()
         return any(token in name for token in query_tokens)
 
-    def _format_symbol_preview(self, symbol: dict[str, Any]) -> str:
+    def _format_symbol_preview(self, symbol: dict[str, Any], *, include_doc: bool = False) -> str:
         name = self._clean_preview_text(str(symbol.get("name") or ""))
         kind = self._clean_preview_text(str(symbol.get("kind") or "symbol"))
         start = int(symbol.get("start", 0) or 0)
@@ -719,7 +737,11 @@ class FileRadarSearchTool:
             signature = self._clean_preview_text(str(symbol.get("signature") or ""))
             if signature:
                 base = f"{base}:{signature}"
-        max_len = 140
+        if include_doc:
+            doc = self._clean_preview_text(str(symbol.get("doc_first_sentence") or ""))
+            if doc:
+                base = f"{base}: {doc}"
+        max_len = 180 if include_doc else 140
         if len(base) > max_len:
             return base[: max_len - 3] + "..."
         return base

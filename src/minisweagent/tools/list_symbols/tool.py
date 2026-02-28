@@ -33,6 +33,8 @@ _FUNCTION_PATTERNS = (
     ),
 )
 
+_DOC_FIRST_SENTENCE_MAX_CHARS = 100
+
 
 def _parse_int(value: Any, *, name: str, default: int, min_value: int, max_value: int) -> int:
     parsed = value if value is not None else default
@@ -270,12 +272,15 @@ class ListSymbolsTool:
             kind: str,
             node: ast.AST,
             signature: str | None = None,
+            doc_first_sentence: str | None = None,
         ) -> None:
             start = int(getattr(node, "lineno", 0) or 0)
             end = int(getattr(node, "end_lineno", start) or start)
             symbol: dict[str, Any] = {"name": name, "kind": kind, "start": start, "end": end}
             if include_signature and signature:
                 symbol["signature"] = signature
+            if doc_first_sentence:
+                symbol["doc_first_sentence"] = doc_first_sentence
             symbols.append(symbol)
 
         def class_signature(node: ast.ClassDef) -> str:
@@ -303,11 +308,23 @@ class ListSymbolsTool:
 
         def visit_class(node: ast.ClassDef, class_prefix: str = "") -> None:
             full_class_name = f"{class_prefix}.{node.name}" if class_prefix else node.name
-            add_symbol(name=full_class_name, kind="class", node=node, signature=class_signature(node))
+            add_symbol(
+                name=full_class_name,
+                kind="class",
+                node=node,
+                signature=class_signature(node),
+                doc_first_sentence=self._extract_doc_first_sentence(node),
+            )
             for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     method_name = f"{full_class_name}.{child.name}"
-                    add_symbol(name=method_name, kind="method", node=child, signature=func_signature(child))
+                    add_symbol(
+                        name=method_name,
+                        kind="method",
+                        node=child,
+                        signature=func_signature(child),
+                        doc_first_sentence=self._extract_doc_first_sentence(child),
+                    )
                 elif isinstance(child, ast.ClassDef):
                     visit_class(child, class_prefix=full_class_name)
 
@@ -315,11 +332,45 @@ class ListSymbolsTool:
             if isinstance(node, ast.ClassDef):
                 visit_class(node)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                add_symbol(name=node.name, kind="function", node=node, signature=func_signature(node))
+                add_symbol(
+                    name=node.name,
+                    kind="function",
+                    node=node,
+                    signature=func_signature(node),
+                    doc_first_sentence=self._extract_doc_first_sentence(node),
+                )
 
         symbols.sort(key=lambda item: (item["start"], item["name"]))
         imports.sort(key=lambda item: item["line"])
         return imports, symbols
+
+    def _extract_doc_first_sentence(self, node: ast.AST) -> str:
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            return ""
+        doc = ast.get_docstring(node, clean=True)
+        if not doc:
+            return ""
+        text = doc.replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not text:
+            return ""
+
+        first_block = re.split(r"\n\s*\n", text, maxsplit=1)[0]
+        normalized = " ".join(first_block.split())
+        if not normalized:
+            return ""
+
+        sentence = normalized
+        period_idx = normalized.find(".")
+        if period_idx != -1:
+            sentence = normalized[: period_idx + 1].strip()
+        sentence = " ".join(sentence.replace("\n", " ").replace("\r", " ").split())
+        if not sentence:
+            return ""
+
+        max_chars = _DOC_FIRST_SENTENCE_MAX_CHARS
+        if len(sentence) > max_chars:
+            sentence = sentence[: max_chars - 3].rstrip() + "..."
+        return sentence
 
     def _extract_regex_skeleton(
         self,

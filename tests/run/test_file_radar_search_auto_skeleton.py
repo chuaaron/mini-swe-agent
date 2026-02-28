@@ -33,9 +33,12 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
             "import os\n"
             "from typing import Any\n\n"
             "class AuthService:\n"
+            "    \"\"\"Authenticate user tokens for API requests.\"\"\"\n"
             "    def login(self, user: str) -> bool:\n"
+            "        \"\"\"Login with token-aware credential check.\"\"\"\n"
             "        return bool(user)\n\n"
             "def helper(token: str) -> bool:\n"
+            "    \"\"\"Validate whether a token uses x-prefix.\"\"\"\n"
             "    return token.startswith('x')\n"
         ),
     )
@@ -88,6 +91,7 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
     assert "Anchor First" in output
     assert "Expand When Needed" in output
     assert "Re-query If Needed" in output
+    assert "Validate whether a token uses x-prefix." in output
     assert "return bool(user)" not in output
 
 
