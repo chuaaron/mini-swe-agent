@@ -75,20 +75,22 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
     assert auto["topn"] == 3
     assert len(auto["files"]) == 3
     assert auto["files"][0]["path"] == "src/auth.py"
-    assert "AuthService" in auto["files"][0]["matched_symbols_preview"]
+    assert "AuthService" in auto["files"][0]["anchors_preview"]
+    assert auto["files"][0]["folded_symbols_count"] >= 0
 
     output = tool._format_results("auth token login", candidates, auto_skeleton=auto)
-    assert "Auto skeleton (Top-3, compact, no code body):" in output
-    assert "🎯 Matched Symbols:" in output
-    assert "📎 Other Context:" in output
-    assert "imports:" not in output
-    assert "💡 SYSTEM HINTS FOR NEXT STEP:" in output
-    assert "TARGET FOUND?" in output
-    assert "NOT FOUND?" in output
+    assert "Auto skeleton (Top-3, extreme folded, no code body):" in output
+    assert "🎯 Anchors:" in output
+    assert "📦 Folded:" in output
+    assert "➡ Next:" in output
+    assert "🚨 STRICT SOP (MANDATORY)" in output
+    assert "STEP 1 — Anchor First:" in output
+    assert "STEP 2 — Expand Only When Needed:" in output
+    assert "STEP 3 — Re-query Instead of Wandering:" in output
     assert "return bool(user)" not in output
 
 
-def test_auto_skeleton_budget_truncates_output(tmp_path: Path):
+def test_auto_skeleton_extreme_folding_avoids_truncation_flag(tmp_path: Path):
     repo = tmp_path / "repo"
     _write_file(
         repo / "src" / "dense.py",
@@ -119,9 +121,10 @@ def test_auto_skeleton_budget_truncates_output(tmp_path: Path):
     auto = tool._build_auto_skeleton(query="auth payload context", repo_root=repo, results=candidates)
     assert auto["enabled"] is True
     assert len(auto["files"]) == 1
+    assert auto["truncated"] is False
     file_item = auto["files"][0]
-    assert file_item["truncated_imports"] == 0
-    assert file_item["truncated_symbols"] > 0
+    assert file_item["folded_imports_count"] >= 0
+    assert file_item["folded_symbols_count"] >= 0
 
     output = tool._format_results("auth payload context", candidates, auto_skeleton=auto)
-    assert "truncated:" in output
+    assert "truncated:" not in output

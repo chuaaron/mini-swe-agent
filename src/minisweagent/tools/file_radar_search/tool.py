@@ -428,35 +428,44 @@ class FileRadarSearchTool:
 
         files = auto_skeleton.get("files", [])
         if auto_skeleton.get("enabled") and files:
-            lines.extend(["", f"Auto skeleton (Top-{len(files)}, compact, no code body):"])
+            lines.extend(["", f"Auto skeleton (Top-{len(files)}, extreme folded, no code body):"])
             for item in files:
                 lines.append(f"[{item['rank']}] {item['path']}")
-                if int(self.config.auto_skeleton_max_imports_per_file) > 0:
-                    imports_preview = item.get("imports_preview", "")
-                    lines.append(f"imports: {imports_preview or '-'}")
-                matched_symbols_preview = item.get("matched_symbols_preview", "")
-                lines.append(f"🎯 Matched Symbols: {matched_symbols_preview or '-'}")
-                other_symbols_preview = item.get("other_symbols_preview", "")
-                lines.append(f"📎 Other Context: {other_symbols_preview or '-'}")
-                extra_parts = []
-                if int(item.get("truncated_imports", 0)) > 0:
-                    extra_parts.append(f"imports+{item['truncated_imports']}")
-                if int(item.get("truncated_symbols", 0)) > 0:
-                    extra_parts.append(f"symbols+{item['truncated_symbols']}")
-                if extra_parts:
-                    lines.append(f"truncated: {', '.join(extra_parts)}")
+                anchors_preview = item.get("anchors_preview", "")
+                lines.append(f"🎯 Anchors: {anchors_preview or '-'}")
+                lines.append(
+                    "📦 Folded: "
+                    f"symbols={int(item.get('folded_symbols_count', 0))}, "
+                    f"imports={int(item.get('folded_imports_count', 0))}"
+                )
+                primary_anchor = item.get("primary_anchor", {})
+                if isinstance(primary_anchor, dict) and primary_anchor.get("start") and primary_anchor.get("end"):
+                    start = int(primary_anchor["start"])
+                    end = int(primary_anchor["end"])
+                    lines.append(f"➡ Next: sed -n '{start},{end}p' {item['path']}")
+                else:
+                    lines.append(f"➡ Next: @tool list_symbols --file \"{item['path']}\"")
                 if item.get("error"):
                     lines.append(f"skeleton_error: {item['error']}")
                 lines.append("")
 
             lines.extend(
                 [
-                    "💡 SYSTEM HINTS FOR NEXT STEP:",
-                    "1. TARGET FOUND? If your target is in the symbols above, use `sed -n 'Lstart,Lend p' <path>` to read the exact code block.",
+                    "🚨 STRICT SOP (MANDATORY)",
+                    "STEP 1 — Anchor First:",
                     (
-                        f"2. NOT FOUND? If the target is not in the Top-{len(files)} skeletons, DO NOT blind-search. "
-                        "Reformulate your query (use synonyms) and call `file_radar_search` again."
+                        "If any file has 🎯 anchors, read ONLY that range first with "
+                        "`sed -n 'Lstart,Lendp' <path>`."
                     ),
+                    "Do NOT open full files with blind `cat`.",
+                    "",
+                    "STEP 2 — Expand Only When Needed:",
+                    "If anchors are '-' or still ambiguous, call `@tool list_symbols --file <path>`.",
+                    "Then pick ONE symbol range and read it with `sed`.",
+                    "",
+                    "STEP 3 — Re-query Instead of Wandering:",
+                    f"If Top-{len(files)} still fail, reformulate query and call `file_radar_search` again.",
+                    "Do NOT submit localization directly from radar output.",
                 ]
             )
         return "\n".join(lines).strip()
@@ -490,29 +499,28 @@ class FileRadarSearchTool:
             }
 
         query_tokens = self._query_tokens(query) if self.config.auto_skeleton_query_aware else set()
-        budgets = self._allocate_auto_skeleton_budgets(len(selected), budget_chars)
         files: list[dict[str, Any]] = []
         any_truncated = False
 
         import_limit = max(0, int(self.config.auto_skeleton_max_imports_per_file))
-        symbol_limit = max(0, int(self.config.auto_skeleton_max_symbols_per_file))
-        raw_import_limit = import_limit * 2 if import_limit > 0 else 0
-        raw_symbol_limit = max(symbol_limit * 3, 30) if symbol_limit > 0 else 0
-        for idx, (candidate, item_budget) in enumerate(zip(selected, budgets), start=1):
+        symbol_limit = max(1, int(self.config.auto_skeleton_max_symbols_per_file))
+        raw_import_limit = min(1000, max(200, import_limit * 10)) if import_limit > 0 else 0
+        raw_symbol_limit = min(2000, max(200, symbol_limit * 10))
+        anchor_limit = min(2, symbol_limit)
+        for idx, candidate in enumerate(selected, start=1):
             path = str(candidate.get("path") or "").strip()
             base = {
                 "rank": idx,
                 "path": path,
                 "score": float(candidate.get("score", 0.0) or 0.0),
                 "evidence_count": int(candidate.get("evidence_count", 0) or 0),
-                "budget_chars": int(item_budget),
-                "imports_preview": "",
-                "matched_symbols_preview": "",
-                "other_symbols_preview": "",
-                "symbols_preview": "",
+                "budget_chars": int(budget_chars),
+                "anchors_preview": "",
                 "query_hits_preview": "",
-                "truncated_imports": 0,
-                "truncated_symbols": 0,
+                "primary_anchor": {},
+                "anchor_count": 0,
+                "folded_imports_count": 0,
+                "folded_symbols_count": 0,
                 "import_count": 0,
                 "symbol_count": 0,
                 "error": "",
@@ -545,63 +553,25 @@ class FileRadarSearchTool:
             if query_tokens:
                 symbols.sort(key=lambda item: self._symbol_rank_key(item, query_tokens), reverse=True)
 
-            trimmed_imports = imports[:import_limit] if import_limit > 0 else []
-            import_items = [self._clean_preview_text(text) for text in trimmed_imports] if import_limit > 0 else []
-            trimmed_symbols = symbols[:symbol_limit] if symbol_limit > 0 else []
-            symbol_entries = [
-                {
-                    "text": self._format_symbol_preview(symbol),
-                    "matched": self._is_symbol_match(symbol, query_tokens),
-                }
-                for symbol in trimmed_symbols
-            ]
-
-            if import_limit > 0:
-                import_budget = max(40, int(item_budget * 0.2))
-                symbol_budget = max(0, item_budget - import_budget)
-            else:
-                import_budget = 0
-                symbol_budget = item_budget
-
-            import_preview, used_imports = self._join_with_budget(import_items, import_budget)
             if query_tokens:
-                matched_items = [entry["text"] for entry in symbol_entries if entry["matched"]]
-                other_items = [entry["text"] for entry in symbol_entries if not entry["matched"]]
+                matched_symbols = [symbol for symbol in symbols if self._is_symbol_match(symbol, query_tokens)]
             else:
-                matched_items = []
-                other_items = [entry["text"] for entry in symbol_entries]
+                matched_symbols = []
 
-            if matched_items:
-                matched_budget = max(40, int(symbol_budget * 0.6))
-                other_budget = max(0, symbol_budget - matched_budget)
-            else:
-                matched_budget = 0
-                other_budget = symbol_budget
-
-            matched_symbols_preview, used_matched = self._join_with_budget(matched_items, matched_budget)
-            other_symbols_preview, used_other = self._join_with_budget(other_items, other_budget)
-            used_symbols = used_matched + used_other
-            truncated_imports = (
-                max(0, len(import_items) - used_imports) + max(0, len(imports) - len(trimmed_imports))
-                if import_limit > 0
-                else 0
-            )
-            truncated_symbols = (
-                max(0, len(symbol_entries) - used_symbols) + max(0, len(symbols) - len(trimmed_symbols))
-                if symbol_limit > 0
-                else 0
-            )
-            any_truncated = any_truncated or bool(truncated_imports or truncated_symbols)
-
-            base["imports_preview"] = import_preview
-            base["matched_symbols_preview"] = matched_symbols_preview
-            base["other_symbols_preview"] = other_symbols_preview
-            base["symbols_preview"] = ", ".join(
-                item for item in [matched_symbols_preview, other_symbols_preview] if item
-            )
-            base["query_hits_preview"] = matched_symbols_preview
-            base["truncated_imports"] = truncated_imports
-            base["truncated_symbols"] = truncated_symbols
+            anchors = matched_symbols[:anchor_limit]
+            anchor_texts = [self._format_symbol_preview(symbol) for symbol in anchors]
+            base["anchors_preview"] = ", ".join(anchor_texts)
+            base["query_hits_preview"] = base["anchors_preview"]
+            base["anchor_count"] = len(anchors)
+            if anchors:
+                base["primary_anchor"] = {
+                    "name": str(anchors[0].get("name") or ""),
+                    "kind": str(anchors[0].get("kind") or ""),
+                    "start": int(anchors[0].get("start", 0) or 0),
+                    "end": int(anchors[0].get("end", 0) or 0),
+                }
+            base["folded_imports_count"] = len(imports)
+            base["folded_symbols_count"] = max(0, len(symbols) - len(anchors))
             files.append(base)
 
         return {
