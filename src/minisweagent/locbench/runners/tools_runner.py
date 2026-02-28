@@ -107,6 +107,7 @@ class ProgressTrackingAgent(ToolAgent):
         self.radar_tool_output_chars = 0
         self.code_search_called_count = 0
         self.code_search_tool_output_chars = 0
+        self.list_symbols_called_count = 0
         self.blocked_submission_count = 0
         self.code_search_index_status_counts: dict[str, int] = {}
         self.code_search_last_index_status: str | None = None
@@ -121,6 +122,7 @@ class ProgressTrackingAgent(ToolAgent):
         self.radar_auto_skeleton_budget_chars: int | None = None
         self.radar_auto_skeleton_truncated: bool | None = None
         self.radar_auto_skeleton_files: list[dict[str, Any]] = []
+        self.list_symbols_inspected_files: set[str] = set()
         self._verification_interception_streak = 0
         self._strict_recovery_mode = False
 
@@ -141,6 +143,12 @@ class ProgressTrackingAgent(ToolAgent):
                 preview_lines += "\nObserved read files:\n" + "\n".join(f"- {path}" for path in inspected_preview)
                 if len(inspected) > len(inspected_preview):
                     preview_lines += f"\n- ... ({len(inspected) - len(inspected_preview)} more)"
+            symbols_only = sorted(set(self.list_symbols_inspected_files) - set(self.inspected_files))
+            symbols_preview = symbols_only[:5]
+            if symbols_preview:
+                preview_lines += "\nObserved list_symbols files:\n" + "\n".join(f"- {path}" for path in symbols_preview)
+                if len(symbols_only) > len(symbols_preview):
+                    preview_lines += f"\n- ... ({len(symbols_only) - len(symbols_preview)} more)"
         return preview_lines
 
     def _strict_recovery_template(self) -> str:
@@ -182,7 +190,7 @@ class ProgressTrackingAgent(ToolAgent):
             "SYSTEM_INTERCEPTION: Verification Required.\n"
             "You invoked file_radar_search, but have not inspected any returned candidate file with bash.\n"
             "This is not a JSON formatting error.\n"
-            "Before submitting final output, run at least one successful bash read command on a candidate file.\n"
+            "Before submitting final output, inspect at least one candidate file via bash read or @tool list_symbols.\n"
             "Allowed commands: rg, grep, sed, cat, nl, head, tail.\n"
             "Examples: `rg -n \"token\" path/to/candidate.py` or `sed -n '1,80p' path/to/candidate.py`.\n"
             "If you are near the step limit, combine verification and submission in one command.\n"
@@ -199,8 +207,8 @@ class ProgressTrackingAgent(ToolAgent):
         base = (
             "SYSTEM_INTERCEPTION: Submission Read Verification Required.\n"
             "This is not a JSON formatting error.\n"
-            "Your final JSON includes file_hint values that were not observed in bash read history.\n"
-            "You must read each submitted file_hint with rg/grep/sed/cat/nl/head/tail before submitting.\n"
+            "Your final JSON includes file_hint values that were not observed in verification history.\n"
+            "Each submitted file_hint must be inspected via bash read or @tool list_symbols before submitting.\n"
             "Unverified file_hint values:\n"
             f"{lines}\n"
             "Radar candidates and read history:\n"
@@ -229,6 +237,7 @@ class ProgressTrackingAgent(ToolAgent):
             "You must run exactly ONE bash command that BOTH:\n"
             "1) Reads at least one candidate file from file_radar_search\n"
             "2) Prints the final output marker and JSON payload\n"
+            "Alternative: if you already used @tool list_symbols on the target file_hint, you may submit directly.\n"
             "Use a pattern like:\n"
             f"`sed -n '1,80p' {target} >/dev/null && printf 'MINI_SWE_AGENT_FINAL_OUTPUT\\n{{\"functions\":[...]}}\\n'`\n"
             "Candidate files from radar:\n"
@@ -421,7 +430,7 @@ class ProgressTrackingAgent(ToolAgent):
         return hints
 
     def _is_hint_inspected(self, hint: str) -> bool:
-        observed = set(self.inspected_files) | set(self.verified_files)
+        observed = set(self.inspected_files) | set(self.verified_files) | set(self.list_symbols_inspected_files)
         if not observed:
             return False
         if hint in observed:
@@ -433,6 +442,25 @@ class ProgressTrackingAgent(ToolAgent):
         if "/" in hint:
             return any(item.endswith(hint) for item in observed)
         return False
+
+    def _mark_verification_from_list_symbols(self, data: dict[str, Any] | None) -> None:
+        if not isinstance(data, dict):
+            return
+        raw_file = data.get("file")
+        if not isinstance(raw_file, str) or not raw_file.strip():
+            return
+        workdir = str(self.extra_template_vars.get("workdir") or "").rstrip("/")
+        normalized = self._normalize_path_token(raw_file, workdir=workdir)
+        if not normalized:
+            return
+        self.list_symbols_inspected_files.add(normalized)
+        self.inspected_files.add(normalized)
+        for candidate in self.candidate_files:
+            if self._is_hint_inspected(candidate):
+                self.verified_files.add(candidate)
+        if self.needs_verification and self.verified_files:
+            self.needs_verification = False
+            self._reset_interception_guard()
 
     def _allows_read_verification(self, *, command_name: str, return_code: int, output_text: str) -> bool:
         if command_name not in self.verification_read_commands:
@@ -588,8 +616,12 @@ class ProgressTrackingAgent(ToolAgent):
                     candidate_files.add(path.strip())
             self.candidate_files = candidate_files
             self.verified_files = set()
+            self.list_symbols_inspected_files = set()
             self._reset_interception_guard()
             self.needs_verification = self.enforce_tool_verification and bool(candidate_files)
+        if command.startswith("@tool list_symbols"):
+            self.list_symbols_called_count += 1
+            self._mark_verification_from_list_symbols(result.data if isinstance(result.data, dict) else None)
 
         return {
             "type": "tool",
@@ -1123,10 +1155,12 @@ def _process_instance(
         radar_tool_output_chars = getattr(agent, "radar_tool_output_chars", 0) if agent else 0
         code_search_called = getattr(agent, "code_search_called_count", 0) if agent else 0
         code_search_tool_output_chars = getattr(agent, "code_search_tool_output_chars", 0) if agent else 0
+        list_symbols_called = getattr(agent, "list_symbols_called_count", 0) if agent else 0
         blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
         inspected_files = sorted(getattr(agent, "inspected_files", set())) if agent else []
+        list_symbols_inspected_files = sorted(getattr(agent, "list_symbols_inspected_files", set())) if agent else []
         code_search_index_status_counts = dict(getattr(agent, "code_search_index_status_counts", {})) if agent else {}
         code_search_last_index_status = getattr(agent, "code_search_last_index_status", None) if agent else None
         code_search_last_index_reason = getattr(agent, "code_search_last_index_reason", None) if agent else None
@@ -1175,6 +1209,8 @@ def _process_instance(
             output_record["radar_verified_files"] = radar_verified_files
             output_record["inspected_files"] = inspected_files
             output_record["radar_verification_satisfied"] = verification_satisfied
+            output_record["list_symbols_called"] = list_symbols_called
+            output_record["list_symbols_inspected_files"] = list_symbols_inspected_files
             output_record["radar_index_status_counts"] = radar_index_status_counts
             output_record["radar_last_index_status"] = radar_last_index_status
             output_record["radar_last_index_reason"] = radar_last_index_reason
@@ -1224,6 +1260,7 @@ def _process_instance(
             summary_record["radar_tool_output_chars"] = radar_tool_output_chars
             summary_record["blocked_submission_count"] = blocked_submission_count
             summary_record["radar_verification_satisfied"] = verification_satisfied
+            summary_record["list_symbols_called"] = list_symbols_called
             summary_record["radar_index_status_counts"] = radar_index_status_counts
             summary_record["radar_last_index_status"] = radar_last_index_status
             summary_record["radar_last_index_reason"] = radar_last_index_reason

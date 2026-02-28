@@ -428,11 +428,13 @@ class FileRadarSearchTool:
 
         files = auto_skeleton.get("files", [])
         if auto_skeleton.get("enabled") and files:
-            lines.extend(["", f"Auto skeleton (Top-{len(files)}, extreme folded, no code body):"])
+            lines.extend(["", f"Auto skeleton (Top-{len(files)}, balanced folded, no code body):"])
             for item in files:
                 lines.append(f"[{item['rank']}] {item['path']}")
                 anchors_preview = item.get("anchors_preview", "")
                 lines.append(f"🎯 Anchors: {anchors_preview or '-'}")
+                context_glimpse_preview = item.get("context_glimpse_preview", "")
+                lines.append(f"🧭 Context Glimpse: {context_glimpse_preview or '-'}")
                 lines.append(
                     "📦 Folded: "
                     f"symbols={int(item.get('folded_symbols_count', 0))}, "
@@ -451,21 +453,14 @@ class FileRadarSearchTool:
 
             lines.extend(
                 [
-                    "🚨 STRICT SOP (MANDATORY)",
-                    "STEP 1 — Anchor First:",
+                    "💡 Next-Step Playbook:",
+                    "1) Anchor First: If you see 🎯 anchors, read that exact range first with `sed -n 'Lstart,Lendp' <path>`.",
+                    "2) Expand When Needed: If anchors are '-' or still ambiguous, call `@tool list_symbols --file <path>` and then read one chosen range with `sed`.",
                     (
-                        "If any file has 🎯 anchors, read ONLY that range first with "
-                        "`sed -n 'Lstart,Lendp' <path>`."
+                        f"3) Re-query If Needed: If Top-{len(files)} still looks wrong, refine the query and call `file_radar_search` again."
                     ),
-                    "Do NOT open full files with blind `cat`.",
                     "",
-                    "STEP 2 — Expand Only When Needed:",
-                    "If anchors are '-' or still ambiguous, call `@tool list_symbols --file <path>`.",
-                    "Then pick ONE symbol range and read it with `sed`.",
-                    "",
-                    "STEP 3 — Re-query Instead of Wandering:",
-                    f"If Top-{len(files)} still fail, reformulate query and call `file_radar_search` again.",
-                    "Do NOT submit localization directly from radar output.",
+                    "Tip: Final submission is safer after the target file has been inspected via bash read or list_symbols expansion.",
                 ]
             )
         return "\n".join(lines).strip()
@@ -516,9 +511,11 @@ class FileRadarSearchTool:
                 "evidence_count": int(candidate.get("evidence_count", 0) or 0),
                 "budget_chars": int(budget_chars),
                 "anchors_preview": "",
+                "context_glimpse_preview": "",
                 "query_hits_preview": "",
                 "primary_anchor": {},
                 "anchor_count": 0,
+                "context_glimpse_count": 0,
                 "folded_imports_count": 0,
                 "folded_symbols_count": 0,
                 "import_count": 0,
@@ -570,8 +567,24 @@ class FileRadarSearchTool:
                     "start": int(anchors[0].get("start", 0) or 0),
                     "end": int(anchors[0].get("end", 0) or 0),
                 }
+            # Elastic folding:
+            # - keep query anchors
+            # - return a tiny representative glimpse of non-anchor symbols to preserve semantic "smell"
+            if idx == 1 and not anchors:
+                context_limit = min(5, symbol_limit)
+            else:
+                context_limit = min(3, symbol_limit)
+            glimpses = self._select_context_glimpses(
+                symbols=symbols,
+                anchors=anchors,
+                query_tokens=query_tokens,
+                limit=context_limit,
+            )
+            glimpse_texts = [self._format_symbol_preview(symbol) for symbol in glimpses]
+            base["context_glimpse_preview"] = ", ".join(glimpse_texts)
+            base["context_glimpse_count"] = len(glimpses)
             base["folded_imports_count"] = len(imports)
-            base["folded_symbols_count"] = max(0, len(symbols) - len(anchors))
+            base["folded_symbols_count"] = max(0, len(symbols) - len(anchors) - len(glimpses))
             files.append(base)
 
         return {
@@ -581,6 +594,75 @@ class FileRadarSearchTool:
             "files": files,
             "truncated": any_truncated,
         }
+
+    def _select_context_glimpses(
+        self,
+        *,
+        symbols: list[dict[str, Any]],
+        anchors: list[dict[str, Any]],
+        query_tokens: set[str],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        anchor_keys = {
+            (
+                str(symbol.get("name") or ""),
+                int(symbol.get("start", 0) or 0),
+                int(symbol.get("end", 0) or 0),
+                str(symbol.get("kind") or ""),
+            )
+            for symbol in anchors
+        }
+        remaining = []
+        for symbol in symbols:
+            key = (
+                str(symbol.get("name") or ""),
+                int(symbol.get("start", 0) or 0),
+                int(symbol.get("end", 0) or 0),
+                str(symbol.get("kind") or ""),
+            )
+            if key in anchor_keys:
+                continue
+            remaining.append(symbol)
+        if not remaining:
+            return []
+
+        ranked = sorted(remaining, key=lambda item: self._symbol_rank_key(item, query_tokens), reverse=True)
+        selected: list[dict[str, Any]] = []
+        seen_kinds: set[str] = set()
+        # First pass: diverse kinds for broader semantic cues.
+        for symbol in ranked:
+            kind = str(symbol.get("kind") or "symbol")
+            if kind in seen_kinds:
+                continue
+            selected.append(symbol)
+            seen_kinds.add(kind)
+            if len(selected) >= limit:
+                return selected
+        # Second pass: fill by rank.
+        selected_keys = {
+            (
+                str(symbol.get("name") or ""),
+                int(symbol.get("start", 0) or 0),
+                int(symbol.get("end", 0) or 0),
+                str(symbol.get("kind") or ""),
+            )
+            for symbol in selected
+        }
+        for symbol in ranked:
+            key = (
+                str(symbol.get("name") or ""),
+                int(symbol.get("start", 0) or 0),
+                int(symbol.get("end", 0) or 0),
+                str(symbol.get("kind") or ""),
+            )
+            if key in selected_keys:
+                continue
+            selected.append(symbol)
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
 
     def _allocate_auto_skeleton_budgets(self, n_files: int, total_budget: int) -> list[int]:
         if n_files <= 0:
@@ -637,6 +719,9 @@ class FileRadarSearchTool:
             signature = self._clean_preview_text(str(symbol.get("signature") or ""))
             if signature:
                 base = f"{base}:{signature}"
+        max_len = 140
+        if len(base) > max_len:
+            return base[: max_len - 3] + "..."
         return base
 
     def _join_with_budget(self, items: list[str], budget_chars: int) -> tuple[str, int]:

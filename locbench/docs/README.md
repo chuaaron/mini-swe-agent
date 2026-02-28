@@ -35,3 +35,4 @@
 
 1. Radar + list_symbols + 轨迹指标分析（2026-02-26）：`locbench/docs/locbench_radar_symbols_changes_20260226.md`
 2. Radar Top-N 自动骨架（2026-02-27）：`locbench/docs/locbench_radar_auto_skeleton_changes_20260227.md`
+3. Radar v2.2 Balanced Hybrid（2026-02-28）：`locbench/docs/locbench_radar_balanced_hybrid_v22_20260228.md`

@@ -79,14 +79,15 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
     assert auto["files"][0]["folded_symbols_count"] >= 0
 
     output = tool._format_results("auth token login", candidates, auto_skeleton=auto)
-    assert "Auto skeleton (Top-3, extreme folded, no code body):" in output
+    assert "Auto skeleton (Top-3, balanced folded, no code body):" in output
     assert "🎯 Anchors:" in output
+    assert "🧭 Context Glimpse:" in output
     assert "📦 Folded:" in output
     assert "➡ Next:" in output
-    assert "🚨 STRICT SOP (MANDATORY)" in output
-    assert "STEP 1 — Anchor First:" in output
-    assert "STEP 2 — Expand Only When Needed:" in output
-    assert "STEP 3 — Re-query Instead of Wandering:" in output
+    assert "💡 Next-Step Playbook:" in output
+    assert "Anchor First" in output
+    assert "Expand When Needed" in output
+    assert "Re-query If Needed" in output
     assert "return bool(user)" not in output
 
 
