@@ -143,3 +143,51 @@ def test_parse_action_duplicate_identical_blocks_are_tolerated():
 
     assert action["type"] == "bash"
     assert action["command"] == "sed -n '1,40p' pkg/a.py"
+
+
+def test_list_symbols_does_not_bypass_bash_verification_requirement():
+    agent = _build_agent()
+    agent.radar_called_count = 1
+    agent.candidate_files = {"pkg/a.py"}
+    agent.needs_verification = True
+
+    agent._mark_verification_from_list_symbols({"file": "pkg/a.py"})  # noqa: SLF001
+
+    assert agent.list_symbols_inspected_files == {"pkg/a.py"}
+    assert agent.needs_verification is True
+
+
+def test_submission_requires_non_top1_cross_check_when_radar_has_multiple_candidates():
+    agent = _build_agent()
+    agent.radar_called_count = 1
+    agent.candidate_files = {"pkg/a.py", "pkg/b.py"}
+    agent.radar_ranked_candidates = ["pkg/a.py", "pkg/b.py"]
+    agent.radar_top1_file = "pkg/a.py"
+    agent.radar_top2_to5_files = ["pkg/b.py"]
+    agent.radar_anti_laziness_applicable = True
+    agent.radar_anti_laziness_satisfied = False
+    agent.needs_verification = False
+    agent.inspected_files = {"pkg/a.py"}
+
+    payload = "MINI_SWE_AGENT_FINAL_OUTPUT\n{\"functions\":[{\"function\":\"target\",\"file_hint\":\"pkg/a.py\"}]}\n"
+    with pytest.raises(FormatError):
+        agent.has_finished({"output": payload})
+    assert agent.blocked_submission_count == 1
+
+
+def test_submission_passes_after_non_top1_cross_check():
+    agent = _build_agent()
+    agent.radar_called_count = 1
+    agent.candidate_files = {"pkg/a.py", "pkg/b.py"}
+    agent.radar_ranked_candidates = ["pkg/a.py", "pkg/b.py"]
+    agent.radar_top1_file = "pkg/a.py"
+    agent.radar_top2_to5_files = ["pkg/b.py"]
+    agent.radar_anti_laziness_applicable = True
+    agent.list_symbols_inspected_files = {"pkg/b.py"}
+    agent.inspected_files = {"pkg/a.py"}
+    agent._refresh_radar_anti_laziness_state()  # noqa: SLF001
+    agent.needs_verification = False
+
+    payload = "MINI_SWE_AGENT_FINAL_OUTPUT\n{\"functions\":[{\"function\":\"target\",\"file_hint\":\"pkg/a.py\"}]}\n"
+    with pytest.raises(Submitted):
+        agent.has_finished({"output": payload})

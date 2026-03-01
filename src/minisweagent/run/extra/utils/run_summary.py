@@ -111,6 +111,13 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
         radar_verified_count = sum(
             1 for item in radar_called_instances if bool(item.get("radar_verification_satisfied"))
         )
+        anti_laziness_applicable_instances = [
+            item for item in radar_called_instances if bool(item.get("radar_anti_laziness_applicable"))
+        ]
+        anti_laziness_applicable_count = len(anti_laziness_applicable_instances)
+        anti_laziness_compliant_count = sum(
+            1 for item in anti_laziness_applicable_instances if bool(item.get("radar_anti_laziness_satisfied"))
+        )
         blocked_submission_count = sum(int(item.get("blocked_submission_count", 0) or 0) for item in instance_summaries)
 
         total_tool_calls = sum(int(item.get("radar_tool_calls", 0) or 0) for item in instance_summaries)
@@ -129,6 +136,14 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
                 "radar_called_count": radar_called_count,
                 "verification_compliance_rate": (
                     radar_verified_count / radar_called_count if radar_called_count else None
+                ),
+                "anti_laziness_applicable_count": anti_laziness_applicable_count,
+                "anti_laziness_compliant_count": anti_laziness_compliant_count,
+                "anti_laziness_violation_count": anti_laziness_applicable_count - anti_laziness_compliant_count,
+                "anti_laziness_compliance_rate": (
+                    anti_laziness_compliant_count / anti_laziness_applicable_count
+                    if anti_laziness_applicable_count
+                    else None
                 ),
                 "blocked_submission_count": blocked_submission_count,
                 "avg_tool_output_chars": avg_tool_output_chars,

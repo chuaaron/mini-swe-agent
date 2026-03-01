@@ -187,3 +187,39 @@ def test_run_summary_computes_acc_at_1_and_file_recall_at_1():
     assert stats["function_hit_rate"] == pytest.approx(2 / 3)
     assert stats["function_acc_at_1"] == pytest.approx(2 / 3)
     assert stats["function_recall_at_1"] == pytest.approx((1.0 + 0.0 + 1.0) / 3)
+
+
+def test_run_summary_computes_anti_laziness_metrics():
+    summaries = [
+        {
+            "instance_id": "a",
+            "exit_status": "Submitted",
+            "correct": True,
+            "radar_called": True,
+            "radar_anti_laziness_applicable": True,
+            "radar_anti_laziness_satisfied": True,
+        },
+        {
+            "instance_id": "b",
+            "exit_status": "Submitted",
+            "correct": False,
+            "radar_called": True,
+            "radar_anti_laziness_applicable": True,
+            "radar_anti_laziness_satisfied": False,
+        },
+        {
+            "instance_id": "c",
+            "exit_status": "Submitted",
+            "correct": True,
+            "radar_called": True,
+            "radar_anti_laziness_applicable": False,
+            "radar_anti_laziness_satisfied": False,
+        },
+    ]
+
+    stats = _build_overall_stats(summaries)
+
+    assert stats["anti_laziness_applicable_count"] == 2
+    assert stats["anti_laziness_compliant_count"] == 1
+    assert stats["anti_laziness_violation_count"] == 1
+    assert stats["anti_laziness_compliance_rate"] == pytest.approx(0.5)

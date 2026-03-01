@@ -14,6 +14,13 @@ from typing import Any
 
 from minisweagent.tools.base import ToolResult
 from minisweagent.tools.code_search.chunkers import Chunk, SlidingChunker
+from minisweagent.tools.file_radar_search.radar_nav import (
+    build_focused_tree,
+    build_reverse_graph,
+    extract_call_graph,
+    find_cross_file_deps,
+    format_call_relations,
+)
 from minisweagent.tools.list_symbols import ListSymbolsTool
 
 _INDEX_VERSION = "radar_v1"
@@ -426,25 +433,46 @@ class FileRadarSearchTool:
                 f"{idx}. {item['path']} (score: {item['score']:.2f}, evidence: {item['evidence_count']})"
             )
 
+        directory_tree = auto_skeleton.get("directory_tree", "")
+        cross_deps = auto_skeleton.get("cross_file_deps", {})
+        if directory_tree:
+            lines.extend(["", "── Directory Context ──", directory_tree])
+        if cross_deps:
+            lines.extend(["", "── File Dependencies ──"])
+            for src, dsts in cross_deps.items():
+                lines.append(f"  {src} → imports from → {', '.join(dsts)}")
+
         files = auto_skeleton.get("files", [])
         if auto_skeleton.get("enabled") and files:
             lines.extend(["", f"Auto skeleton (Top-{len(files)}, balanced folded, no code body):"])
             for item in files:
                 lines.append(f"[{item['rank']}] {item['path']}")
+                cg = item.get("call_graph", {})
+                rg = item.get("reverse_graph", {})
                 lines.append("🎯 Anchors:")
                 anchor_items = item.get("anchors_items", [])
+                anchor_names = item.get("anchor_names", [])
                 if isinstance(anchor_items, list) and anchor_items:
-                    for text in anchor_items:
+                    for i, text in enumerate(anchor_items):
                         lines.append(f"    - {text}")
+                        if i < len(anchor_names) and anchor_names[i]:
+                            rel = format_call_relations(anchor_names[i], cg, rg)
+                            if rel:
+                                lines.append(f"      {rel}")
                 else:
                     anchors_preview = item.get("anchors_preview", "")
                     lines.append(f"    - {anchors_preview or '-'}")
 
                 lines.append("🧭 Context Glimpse:")
                 glimpse_items = item.get("context_glimpse_items", [])
+                glimpse_names = item.get("context_glimpse_names", [])
                 if isinstance(glimpse_items, list) and glimpse_items:
-                    for text in glimpse_items:
+                    for i, text in enumerate(glimpse_items):
                         lines.append(f"    - {text}")
+                        if i < len(glimpse_names) and glimpse_names[i]:
+                            rel = format_call_relations(glimpse_names[i], cg, rg)
+                            if rel:
+                                lines.append(f"      {rel}")
                 else:
                     context_glimpse_preview = item.get("context_glimpse_preview", "")
                     lines.append(f"    - {context_glimpse_preview or '-'}")
@@ -563,6 +591,16 @@ class FileRadarSearchTool:
             base["import_count"] = len(imports)
             base["symbol_count"] = len(symbols)
 
+            call_graph: dict[str, list[str]] = {}
+            full_path = repo_root / path
+            if full_path.exists() and full_path.suffix == ".py":
+                try:
+                    call_graph = extract_call_graph(full_path.read_text(encoding="utf-8", errors="replace"))
+                except (OSError, SyntaxError):
+                    pass
+            base["call_graph"] = call_graph
+            base["reverse_graph"] = build_reverse_graph(call_graph)
+
             if query_tokens:
                 symbols.sort(key=lambda item: self._symbol_rank_key(item, query_tokens), reverse=True)
 
@@ -577,6 +615,7 @@ class FileRadarSearchTool:
             base["anchors_items"] = anchor_texts
             base["query_hits_preview"] = base["anchors_preview"]
             base["anchor_count"] = len(anchors)
+            base["anchor_names"] = [str(s.get("name", "")) for s in anchors]
             if anchors:
                 base["primary_anchor"] = {
                     "name": str(anchors[0].get("name") or ""),
@@ -601,9 +640,14 @@ class FileRadarSearchTool:
             base["context_glimpse_preview"] = ", ".join(glimpse_texts)
             base["context_glimpse_items"] = glimpse_texts
             base["context_glimpse_count"] = len(glimpses)
+            base["context_glimpse_names"] = [str(s.get("name", "")) for s in glimpses]
             base["folded_imports_count"] = len(imports)
             base["folded_symbols_count"] = max(0, len(symbols) - len(anchors) - len(glimpses))
             files.append(base)
+
+        file_paths = [f["path"] for f in files if f.get("path")]
+        cross_file_deps = find_cross_file_deps(repo_root, file_paths) if len(file_paths) > 1 else {}
+        directory_tree = build_focused_tree(file_paths) if file_paths else ""
 
         return {
             "enabled": True,
@@ -611,6 +655,8 @@ class FileRadarSearchTool:
             "budget_chars": budget_chars,
             "files": files,
             "truncated": any_truncated,
+            "directory_tree": directory_tree,
+            "cross_file_deps": cross_file_deps,
         }
 
     def _select_context_glimpses(

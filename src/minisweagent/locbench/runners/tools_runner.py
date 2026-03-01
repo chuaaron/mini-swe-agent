@@ -123,6 +123,13 @@ class ProgressTrackingAgent(ToolAgent):
         self.radar_auto_skeleton_truncated: bool | None = None
         self.radar_auto_skeleton_files: list[dict[str, Any]] = []
         self.list_symbols_inspected_files: set[str] = set()
+        self.bash_inspected_files: set[str] = set()
+        self.radar_ranked_candidates: list[str] = []
+        self.radar_top1_file: str | None = None
+        self.radar_top2_to5_files: list[str] = []
+        self.radar_anti_laziness_applicable = False
+        self.radar_anti_laziness_satisfied = False
+        self.radar_non_top1_inspected_files: set[str] = set()
         self._verification_interception_streak = 0
         self._strict_recovery_mode = False
 
@@ -152,7 +159,11 @@ class ProgressTrackingAgent(ToolAgent):
         return preview_lines
 
     def _strict_recovery_template(self) -> str:
-        target = sorted(self.candidate_files)[0] if self.candidate_files else "path/to/candidate.py"
+        target = "path/to/candidate.py"
+        if self.radar_anti_laziness_applicable and not self.radar_anti_laziness_satisfied and self.radar_top2_to5_files:
+            target = self.radar_top2_to5_files[0]
+        elif self.candidate_files:
+            target = sorted(self.candidate_files)[0]
         target_quoted = shlex.quote(target)
         target_json = target.replace("\\", "\\\\").replace('"', '\\"')
         return (
@@ -197,6 +208,23 @@ class ProgressTrackingAgent(ToolAgent):
             "Example: `sed -n '1,80p' path/to/candidate.py >/dev/null && printf 'MINI_SWE_AGENT_FINAL_OUTPUT\\n{...}\\n'`.\n"
             "Candidate files from radar:\n"
             f"{self._candidate_preview_lines()}"
+        )
+        if self._strict_recovery_mode:
+            return self._strict_recovery_message(base)
+        return base
+
+    def _anti_laziness_interception_message(self) -> str:
+        top1 = self.radar_top1_file or "<none>"
+        non_top1_candidates = self.radar_top2_to5_files[:4]
+        lines = "\n".join(f"- {path}" for path in non_top1_candidates) if non_top1_candidates else "- <none>"
+        base = (
+            "SYSTEM_INTERCEPTION: Rank Cross-Check Required.\n"
+            "This is not a JSON formatting error.\n"
+            "After file_radar_search with 2+ candidates, you must inspect at least one non-rank-1 file from ranks 2-5 before submission.\n"
+            f"Top-1 candidate: {top1}\n"
+            "Candidate files from ranks 2-5:\n"
+            f"{lines}\n"
+            "Inspect one of them via bash read or @tool list_symbols, then submit again."
         )
         if self._strict_recovery_mode:
             return self._strict_recovery_message(base)
@@ -274,6 +302,8 @@ class ProgressTrackingAgent(ToolAgent):
         if self.disallow_tools and action.get("type") == "tool":
             raise FormatError(self._tools_forbidden_message())
         if self._strict_recovery_mode and not self._is_valid_strict_recovery_action(action):
+            if self.radar_anti_laziness_applicable and not self.radar_anti_laziness_satisfied:
+                raise FormatError(self._anti_laziness_interception_message())
             raise FormatError(self._verification_interception_message())
         return action
 
@@ -288,8 +318,13 @@ class ProgressTrackingAgent(ToolAgent):
         tokens = self._tokenize_command(command)
         if not tokens:
             return False
+        required_candidates = (
+            self.radar_top2_to5_files
+            if self.radar_anti_laziness_applicable and not self.radar_anti_laziness_satisfied
+            else sorted(self.candidate_files)
+        )
         candidate_tokens: set[str] = set()
-        for path in self.candidate_files:
+        for path in required_candidates:
             cleaned = path.strip()
             if not cleaned:
                 continue
@@ -443,6 +478,15 @@ class ProgressTrackingAgent(ToolAgent):
             return any(item.endswith(hint) for item in observed)
         return False
 
+    def _refresh_radar_anti_laziness_state(self) -> None:
+        if not self.radar_anti_laziness_applicable:
+            self.radar_anti_laziness_satisfied = True
+            self.radar_non_top1_inspected_files = set()
+            return
+        inspected = {path for path in self.radar_top2_to5_files if self._is_hint_inspected(path)}
+        self.radar_non_top1_inspected_files = inspected
+        self.radar_anti_laziness_satisfied = bool(inspected)
+
     def _mark_verification_from_list_symbols(self, data: dict[str, Any] | None) -> None:
         if not isinstance(data, dict):
             return
@@ -455,12 +499,7 @@ class ProgressTrackingAgent(ToolAgent):
             return
         self.list_symbols_inspected_files.add(normalized)
         self.inspected_files.add(normalized)
-        for candidate in self.candidate_files:
-            if self._is_hint_inspected(candidate):
-                self.verified_files.add(candidate)
-        if self.needs_verification and self.verified_files:
-            self.needs_verification = False
-            self._reset_interception_guard()
+        self._refresh_radar_anti_laziness_state()
 
     def _allows_read_verification(self, *, command_name: str, return_code: int, output_text: str) -> bool:
         if command_name not in self.verification_read_commands:
@@ -507,6 +546,7 @@ class ProgressTrackingAgent(ToolAgent):
             if cmd_name in {"rg", "grep"}:
                 resolved_paths.update(self._extract_paths_from_search_output(output_text, workdir=workdir))
             self.inspected_files.update(resolved_paths)
+            self.bash_inspected_files.update(resolved_paths)
 
             if not self.needs_verification or not self.candidate_files:
                 continue
@@ -515,6 +555,7 @@ class ProgressTrackingAgent(ToolAgent):
             for file_path in self.candidate_files:
                 if file_path in resolved_paths:
                     self.verified_files.add(file_path)
+                    self.bash_inspected_files.add(file_path)
                     continue
                 rel = file_path.strip()
                 if not rel:
@@ -527,6 +568,7 @@ class ProgressTrackingAgent(ToolAgent):
                     candidate_tokens.add(basename)
                 if candidate_tokens & segment_tokens:
                     self.verified_files.add(file_path)
+                    self.bash_inspected_files.add(file_path)
                     continue
                 if cmd_name in {"rg", "grep"} and (
                     f"{rel}:" in output_text
@@ -534,7 +576,9 @@ class ProgressTrackingAgent(ToolAgent):
                     or f"binary file {rel.lower()} matches" in output_text.lower()
                 ):
                     self.verified_files.add(file_path)
+                    self.bash_inspected_files.add(file_path)
 
+        self._refresh_radar_anti_laziness_state()
         if self.needs_verification and self.verified_files:
             self.needs_verification = False
             self._reset_interception_guard()
@@ -609,14 +653,27 @@ class ProgressTrackingAgent(ToolAgent):
                 auto_skeleton_files = result.data.get("auto_skeleton_files")
                 if isinstance(auto_skeleton_files, list):
                     self.radar_auto_skeleton_files = auto_skeleton_files
+            ranked_candidates: list[str] = []
+            seen_paths: set[str] = set()
             candidate_files: set[str] = set()
             for item in result.data.get("results", []) if isinstance(result.data, dict) else []:
                 path = item.get("path")
                 if isinstance(path, str) and path.strip():
-                    candidate_files.add(path.strip())
+                    clean_path = path.strip()
+                    candidate_files.add(clean_path)
+                    if clean_path not in seen_paths:
+                        seen_paths.add(clean_path)
+                        ranked_candidates.append(clean_path)
             self.candidate_files = candidate_files
+            self.radar_ranked_candidates = ranked_candidates
+            self.radar_top1_file = ranked_candidates[0] if ranked_candidates else None
+            self.radar_top2_to5_files = ranked_candidates[1:5]
+            self.radar_anti_laziness_applicable = len(ranked_candidates) >= 2
+            self.radar_anti_laziness_satisfied = not self.radar_anti_laziness_applicable
+            self.radar_non_top1_inspected_files = set()
             self.verified_files = set()
             self.list_symbols_inspected_files = set()
+            self.bash_inspected_files = set()
             self._reset_interception_guard()
             self.needs_verification = self.enforce_tool_verification and bool(candidate_files)
         if command.startswith("@tool list_symbols"):
@@ -653,6 +710,14 @@ class ProgressTrackingAgent(ToolAgent):
         if self.enforce_tool_verification and self.needs_verification:
             self._register_interception()
             raise FormatError(self._verification_interception_message())
+        if (
+            self.enforce_tool_verification
+            and self.radar_called_count
+            and self.radar_anti_laziness_applicable
+            and not self.radar_anti_laziness_satisfied
+        ):
+            self._register_interception()
+            raise FormatError(self._anti_laziness_interception_message())
         submission_payload = "".join(lines[1:])
         if self.enforce_tool_verification and self.radar_called_count:
             hints = self._extract_submission_file_hints(submission_payload)
@@ -1159,8 +1224,15 @@ def _process_instance(
         blocked_submission_count = getattr(agent, "blocked_submission_count", 0) if agent else 0
         radar_verified_files = sorted(getattr(agent, "verified_files", set())) if agent else []
         radar_candidate_files = sorted(getattr(agent, "candidate_files", set())) if agent else []
+        radar_ranked_candidates = list(getattr(agent, "radar_ranked_candidates", [])) if agent else []
+        radar_top1_file = getattr(agent, "radar_top1_file", None) if agent else None
+        radar_top2_to5_files = list(getattr(agent, "radar_top2_to5_files", [])) if agent else []
+        radar_non_top1_inspected_files = sorted(getattr(agent, "radar_non_top1_inspected_files", set())) if agent else []
+        radar_anti_laziness_applicable = bool(getattr(agent, "radar_anti_laziness_applicable", False)) if agent else False
+        radar_anti_laziness_satisfied = bool(getattr(agent, "radar_anti_laziness_satisfied", False)) if agent else False
         inspected_files = sorted(getattr(agent, "inspected_files", set())) if agent else []
         list_symbols_inspected_files = sorted(getattr(agent, "list_symbols_inspected_files", set())) if agent else []
+        bash_inspected_files = sorted(getattr(agent, "bash_inspected_files", set())) if agent else []
         code_search_index_status_counts = dict(getattr(agent, "code_search_index_status_counts", {})) if agent else {}
         code_search_last_index_status = getattr(agent, "code_search_last_index_status", None) if agent else None
         code_search_last_index_reason = getattr(agent, "code_search_last_index_reason", None) if agent else None
@@ -1206,11 +1278,18 @@ def _process_instance(
             output_record["radar_tool_output_chars"] = radar_tool_output_chars
             output_record["blocked_submission_count"] = blocked_submission_count
             output_record["radar_candidate_files"] = radar_candidate_files
+            output_record["radar_ranked_candidates"] = radar_ranked_candidates
+            output_record["radar_top1_file"] = radar_top1_file
+            output_record["radar_top2_to5_files"] = radar_top2_to5_files
+            output_record["radar_anti_laziness_applicable"] = radar_anti_laziness_applicable
+            output_record["radar_anti_laziness_satisfied"] = radar_anti_laziness_satisfied
+            output_record["radar_non_top1_inspected_files"] = radar_non_top1_inspected_files
             output_record["radar_verified_files"] = radar_verified_files
             output_record["inspected_files"] = inspected_files
             output_record["radar_verification_satisfied"] = verification_satisfied
             output_record["list_symbols_called"] = list_symbols_called
             output_record["list_symbols_inspected_files"] = list_symbols_inspected_files
+            output_record["bash_inspected_files"] = bash_inspected_files
             output_record["radar_index_status_counts"] = radar_index_status_counts
             output_record["radar_last_index_status"] = radar_last_index_status
             output_record["radar_last_index_reason"] = radar_last_index_reason
@@ -1261,6 +1340,10 @@ def _process_instance(
             summary_record["blocked_submission_count"] = blocked_submission_count
             summary_record["radar_verification_satisfied"] = verification_satisfied
             summary_record["list_symbols_called"] = list_symbols_called
+            summary_record["radar_anti_laziness_applicable"] = radar_anti_laziness_applicable
+            summary_record["radar_anti_laziness_satisfied"] = radar_anti_laziness_satisfied
+            summary_record["radar_non_top1_inspected_count"] = len(radar_non_top1_inspected_files)
+            summary_record["radar_has_bash_inspection"] = bool(bash_inspected_files)
             summary_record["radar_index_status_counts"] = radar_index_status_counts
             summary_record["radar_last_index_status"] = radar_last_index_status
             summary_record["radar_last_index_reason"] = radar_last_index_reason
