@@ -39,6 +39,23 @@ def parse_tool_command(command: str) -> tuple[str, dict[str, Any]]:
         key = token[2:]
         if not key:
             raise ToolCommandError("Empty argument name.")
+        if key == "queries":
+            values: list[str] = []
+            next_idx = idx + 1
+            while next_idx < len(parts) and not parts[next_idx].startswith("--"):
+                values.append(parts[next_idx])
+                next_idx += 1
+            if not values:
+                raise ToolCommandError("Argument 'queries' requires at least one value.")
+            existing = args.get(key)
+            if existing is None:
+                args[key] = values
+            elif isinstance(existing, list):
+                existing.extend(values)
+            else:
+                args[key] = [existing, *values]
+            idx = next_idx
+            continue
         if idx + 1 < len(parts) and not parts[idx + 1].startswith("--"):
             args[key] = parts[idx + 1]
             idx += 2

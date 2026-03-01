@@ -38,6 +38,35 @@ _EXT_LANGUAGE = {
     ".h": "c",
 }
 
+_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "were",
+    "with",
+}
+
 
 def _parse_int(value: Any, *, name: str, default: int, min_value: int, max_value: int) -> int:
     parsed = value if value is not None else default
@@ -56,15 +85,49 @@ def _parse_int(value: Any, *, name: str, default: int, min_value: int, max_value
 @dataclass
 class FileRadarSearchArgs:
     query: str
+    queries: list[str]
+    query_display: str
+    queries_provided: bool
     topk_files: int = 15
     topk_blocks: int = 80
     filters: str | None = None
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any]) -> "FileRadarSearchArgs":
-        query = raw.get("query")
-        if not query or not str(query).strip():
-            raise ValueError("query cannot be empty")
+        raw_query = raw.get("query")
+        raw_queries = raw.get("queries")
+        queries_provided = raw_queries is not None
+
+        query_candidates: list[str] = []
+        if isinstance(raw_queries, list | tuple):
+            for item in raw_queries:
+                text = str(item).strip()
+                if text:
+                    query_candidates.append(text)
+        elif raw_queries is not None:
+            text = str(raw_queries).strip()
+            if text:
+                query_candidates.append(text)
+
+        if raw_query is not None:
+            text = str(raw_query).strip()
+            if text:
+                query_candidates.append(text)
+
+        if not query_candidates:
+            raise ValueError("query or queries cannot be empty")
+
+        queries: list[str] = []
+        seen_queries: set[str] = set()
+        for query in query_candidates:
+            if query in seen_queries:
+                continue
+            seen_queries.add(query)
+            queries.append(query)
+        if len(queries) > 8:
+            raise ValueError("queries must contain at most 8 items")
+        query_display = queries[0] if len(queries) == 1 else " | ".join(queries)
+
         topk_files = _parse_int(
             raw.get("topk-files", raw.get("topk_files")),
             name="topk-files",
@@ -81,7 +144,10 @@ class FileRadarSearchArgs:
         )
         filters = raw.get("filters")
         return cls(
-            query=str(query).strip(),
+            query=queries[0],
+            queries=queries,
+            query_display=query_display,
+            queries_provided=queries_provided,
             topk_files=topk_files,
             topk_blocks=topk_blocks,
             filters=str(filters) if filters else None,
@@ -116,6 +182,8 @@ class FileRadarSearchConfig:
     auto_skeleton_max_symbols_per_file: int = 14
     auto_skeleton_include_signature: bool = False
     auto_skeleton_query_aware: bool = True
+    auto_query_expansion_enabled: bool = True
+    auto_query_expansion_max_queries: int = 3
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "FileRadarSearchConfig":
@@ -299,12 +367,109 @@ class FileRadarSearchTool:
             raise ValueError("auto_skeleton_max_imports_per_file must be between 0 and 200")
         if not 0 <= int(self.config.auto_skeleton_max_symbols_per_file) <= 500:
             raise ValueError("auto_skeleton_max_symbols_per_file must be between 0 and 500")
+        if not 1 <= int(self.config.auto_query_expansion_max_queries) <= 8:
+            raise ValueError("auto_query_expansion_max_queries must be between 1 and 8")
         self.index_root = Path(os.path.expanduser(self.config.index_root)).resolve()
         self.chunker = SlidingChunker(self.config.chunk_size, self.config.overlap)
         self.embedder = self._build_embedder()
         self.list_symbols_tool = ListSymbolsTool({"max_file_size": self.config.max_file_size})
         self._index_cache: dict[tuple[Path, str], FileRadarIndex] = {}
         self._lock = threading.Lock()
+
+    def _auto_expand_query(self, query: str, *, max_queries: int) -> list[str]:
+        normalized = " ".join(str(query).split())
+        if not normalized:
+            return []
+
+        variants: list[str] = []
+        seen_lower: set[str] = set()
+
+        def _add(candidate: str) -> None:
+            text = " ".join(candidate.split())
+            if not text:
+                return
+            lowered = text.lower()
+            if lowered in seen_lower:
+                return
+            seen_lower.add(lowered)
+            variants.append(text)
+
+        _add(normalized)
+        if max_queries <= 1:
+            return variants[:1]
+
+        raw_tokens = re.findall(r"[A-Za-z0-9_./:-]+", normalized)
+        code_like: list[str] = []
+        seen_code: set[str] = set()
+        for token in raw_tokens:
+            cleaned = token.strip(".,;:()[]{}<>\"'")
+            if len(cleaned) < 3:
+                continue
+            is_code_like = (
+                "/" in cleaned
+                or "." in cleaned
+                or "_" in cleaned
+                or "-" in cleaned
+                or any(ch.isupper() for ch in cleaned[1:])
+            )
+            if not is_code_like:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen_code:
+                continue
+            seen_code.add(lowered)
+            code_like.append(cleaned)
+        if code_like:
+            _add(" ".join(code_like[:10]))
+
+        if len(variants) < max_queries:
+            words = re.findall(r"[A-Za-z_][A-Za-z0-9_]+", normalized)
+            concept_terms: list[str] = []
+            seen_terms: set[str] = set()
+            for word in words:
+                lowered = word.lower()
+                if lowered in _QUERY_STOPWORDS:
+                    continue
+                if lowered in seen_terms:
+                    continue
+                seen_terms.add(lowered)
+                concept_terms.append(word)
+            if concept_terms:
+                _add(" ".join(concept_terms[:12]))
+
+        if len(variants) < max_queries and code_like:
+            split_terms: list[str] = []
+            seen_split: set[str] = set()
+            for token in code_like:
+                for part in re.split(r"[./:_-]+", token):
+                    if len(part) < 3:
+                        continue
+                    lowered = part.lower()
+                    if lowered in _QUERY_STOPWORDS:
+                        continue
+                    if lowered in seen_split:
+                        continue
+                    seen_split.add(lowered)
+                    split_terms.append(part)
+            if split_terms:
+                _add(" ".join(split_terms[:12]))
+
+        return variants[:max_queries]
+
+    def _effective_queries(self, parsed: FileRadarSearchArgs) -> tuple[list[str], bool]:
+        if len(parsed.queries) > 1:
+            return parsed.queries, False
+        if parsed.queries_provided:
+            return parsed.queries, False
+        if not self.config.auto_query_expansion_enabled:
+            return parsed.queries, False
+        expanded = self._auto_expand_query(
+            parsed.queries[0],
+            max_queries=max(1, int(self.config.auto_query_expansion_max_queries)),
+        )
+        if not expanded:
+            return parsed.queries, False
+        return expanded, len(expanded) > len(parsed.queries)
 
     def _build_embedder(self):
         provider = self.config.embedding_provider
@@ -335,22 +500,34 @@ class FileRadarSearchTool:
                     commit=base_commit,
                     repo_fingerprint=repo_fingerprint,
                 )
-                query_vec = self.embedder.embed([parsed.query])[0]
                 filters = parse_filters(parsed.filters)
-                blocks = index.search_blocks(query_vec, topk=parsed.topk_blocks, filters=filters)
-                ranked = self._rank_files(blocks, repo_path, repo_dir)
+                effective_queries, query_expanded = self._effective_queries(parsed)
+                query_vectors = self.embedder.embed(effective_queries)
+                ranked_by_query: list[list[dict[str, Any]]] = []
+                for query_vec in query_vectors:
+                    blocks = index.search_blocks(query_vec, topk=parsed.topk_blocks, filters=filters)
+                    ranked = self._rank_files(blocks, repo_path, repo_dir)
+                    ranked_by_query.append(ranked)
+                fused_ranked = self._fuse_ranked_files(ranked_by_query, query_count=len(effective_queries))
                 repo_root = repo_path.resolve()
-                existing_only = [item for item in ranked if self._candidate_exists(repo_root, item["path"])]
+                existing_only = [item for item in fused_ranked if self._candidate_exists(repo_root, item["path"])]
                 structured = existing_only[: parsed.topk_files]
-                auto_skeleton = self._build_auto_skeleton(query=parsed.query, repo_root=repo_root, results=structured)
-                formatted = self._format_results(parsed.query, structured, auto_skeleton=auto_skeleton)
+                auto_skeleton_query = " ".join(effective_queries)
+                auto_skeleton = self._build_auto_skeleton(query=auto_skeleton_query, repo_root=repo_root, results=structured)
+                query_display = effective_queries[0] if len(effective_queries) == 1 else " | ".join(effective_queries)
+                formatted = self._format_results(query_display, structured, auto_skeleton=auto_skeleton)
 
                 data = {
                     "query": parsed.query,
+                    "input_queries": parsed.queries,
+                    "queries": effective_queries,
+                    "query_count": len(effective_queries),
+                    "query_expanded": query_expanded,
+                    "fusion_mode": "single_query" if len(effective_queries) == 1 else "multi_query_rrf_support",
                     "topk_files": parsed.topk_files,
                     "topk_blocks": parsed.topk_blocks,
                     "returned": len(structured),
-                    "returned_before_exists_filter": len(ranked),
+                    "returned_before_exists_filter": len(fused_ranked),
                     "results": structured,
                     "metadata": index.meta,
                     "repo_slug": repo_slug,
@@ -426,12 +603,85 @@ class FileRadarSearchTool:
         ranked.sort(key=lambda item: (item["score"], item["evidence_count"]), reverse=True)
         return ranked
 
+    def _fuse_ranked_files(self, ranked_by_query: list[list[dict[str, Any]]], *, query_count: int) -> list[dict[str, Any]]:
+        if not ranked_by_query:
+            return []
+        if query_count <= 1:
+            return ranked_by_query[0]
+
+        merged: dict[str, dict[str, Any]] = {}
+        for ranked in ranked_by_query:
+            seen_in_this_query: set[str] = set()
+            for rank, item in enumerate(ranked, start=1):
+                path = str(item.get("path") or "")
+                if not path:
+                    continue
+                entry = merged.setdefault(
+                    path,
+                    {
+                        "path": path,
+                        "language": item.get("language"),
+                        "evidence_count": 0,
+                        "dense_score_sum": 0.0,
+                        "dense_score_count": 0,
+                        "rrf_score": 0.0,
+                        "support_count": 0,
+                    },
+                )
+                entry["evidence_count"] += int(item.get("evidence_count", 0) or 0)
+                entry["dense_score_sum"] += float(item.get("score", 0.0) or 0.0)
+                entry["dense_score_count"] += 1
+                entry["rrf_score"] += 1.0 / (60.0 + rank)
+                if path not in seen_in_this_query:
+                    entry["support_count"] += 1
+                    seen_in_this_query.add(path)
+                if not entry.get("language") and item.get("language"):
+                    entry["language"] = item.get("language")
+
+        fused: list[dict[str, Any]] = []
+        for entry in merged.values():
+            support_count = int(entry["support_count"])
+            support_ratio = support_count / float(query_count)
+            dense_mean = (
+                float(entry["dense_score_sum"]) / float(entry["dense_score_count"])
+                if int(entry["dense_score_count"]) > 0
+                else 0.0
+            )
+            dense_mean = max(0.0, min(1.0, dense_mean))
+            fusion_score = 0.6 * support_ratio + 0.4 * dense_mean
+            fused.append(
+                {
+                    "path": entry["path"],
+                    "score": fusion_score,
+                    "evidence_count": int(entry["evidence_count"]),
+                    "language": entry.get("language"),
+                    "support_count": support_count,
+                    "query_count": query_count,
+                    "rrf_score": float(entry["rrf_score"]),
+                    "dense_mean_score": dense_mean,
+                }
+            )
+        fused.sort(
+            key=lambda item: (
+                int(item.get("support_count", 0)),
+                float(item.get("score", 0.0)),
+                float(item.get("rrf_score", 0.0)),
+                int(item.get("evidence_count", 0)),
+            ),
+            reverse=True,
+        )
+        return fused
+
     def _format_results(self, query: str, results: list[dict[str, Any]], *, auto_skeleton: dict[str, Any]) -> str:
         lines = [f'Found {len(results)} candidate files for "{query}":', ""]
         for idx, item in enumerate(results, start=1):
             lines.append(
                 f"{idx}. {item['path']} (score: {item['score']:.2f}, evidence: {item['evidence_count']})"
             )
+            support_count = item.get("support_count")
+            query_count = item.get("query_count")
+            if isinstance(support_count, int) and isinstance(query_count, int) and query_count > 1:
+                lines.append(f"   support: {support_count}/{query_count} queries")
 
         directory_tree = auto_skeleton.get("directory_tree", "")
         cross_deps = auto_skeleton.get("cross_file_deps", {})

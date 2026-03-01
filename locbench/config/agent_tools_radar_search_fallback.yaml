@@ -16,9 +16,10 @@ agent:
 
     ## Available Tools
 
-    ### @tool file_radar_search --query "<desc>" [--topk-files N] [--topk-blocks M] [--filters F]
+    ### @tool file_radar_search --query "<desc>" | --queries "<q1>" "<q2>" ... [--topk-files N] [--topk-blocks M] [--filters F]
     Semantic file-level radar search.
     This tool returns candidate file paths and scores only. It never returns code snippets.
+    For broad or ambiguous issues, prefer --queries with 2-4 diverse phrasings.
 
     You MUST start with bash/rg to localize exact matches.
     Only use file_radar_search if bash returns 0 results or > 20 results after 2 attempts.
@@ -27,6 +28,7 @@ agent:
 
     Examples:
     - @tool file_radar_search --query "centroid computation"
+    - @tool file_radar_search --queries "switch socket on off" "async_turn_on fritzbox" "SmartHome entity update slow"
     - @tool file_radar_search --query "handle user authentication" --topk-files 20
     - @tool file_radar_search --query "database connection pool" --filters "lang:python path:src/"
 

@@ -29,3 +29,8 @@ auto_skeleton_max_imports_per_file: 0
 auto_skeleton_max_symbols_per_file: 14
 auto_skeleton_include_signature: false
 auto_skeleton_query_aware: true
+
+# 单 query 自动扩展（只在未显式提供 --queries 时触发）：
+# 会生成多个视角并做融合排序，帮助提升 GT 文件被检出的概率。
+auto_query_expansion_enabled: true
+auto_query_expansion_max_queries: 3
