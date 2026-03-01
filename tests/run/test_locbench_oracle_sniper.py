@@ -149,3 +149,41 @@ def test_run_summary_computes_oracle_metrics():
     assert stats["steps_to_success_in_oracle_mean"] == pytest.approx(6.0)
     assert stats["steps_to_success_in_oracle_p50"] == 6
     assert stats["steps_to_success_in_oracle_p90"] == 6
+    assert stats["function_hit_rate"] == pytest.approx(1 / 3)
+
+
+def test_run_summary_computes_acc_at_1_and_file_recall_at_1():
+    summaries = [
+        {
+            "instance_id": "a",
+            "exit_status": "Submitted",
+            "correct": True,
+            "file_recall_at_1": 1.0,
+            "function_hit_any": True,
+            "function_recall_at_1": 1.0,
+        },
+        {
+            "instance_id": "b",
+            "exit_status": "Submitted",
+            "correct": False,
+            "file_recall_at_1": 0.5,
+            "function_hit_any": False,
+            "function_recall_at_1": 0.0,
+        },
+        {
+            "instance_id": "c",
+            "exit_status": "Submitted",
+            "correct": True,
+            "file_recall_at_1": 1.0,
+            "function_hit_any": True,
+            "function_recall_at_1": 1.0,
+        },
+    ]
+
+    stats = _build_overall_stats(summaries)
+
+    assert stats["acc_at_1"] == pytest.approx(2 / 3)
+    assert stats["file_recall_at_1"] == pytest.approx((1.0 + 0.5 + 1.0) / 3)
+    assert stats["function_hit_rate"] == pytest.approx(2 / 3)
+    assert stats["function_acc_at_1"] == pytest.approx(2 / 3)
+    assert stats["function_recall_at_1"] == pytest.approx((1.0 + 0.0 + 1.0) / 3)

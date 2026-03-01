@@ -27,8 +27,36 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
     trace_tokens = [int(item.get("trace_tokens", 0) or 0) for item in instance_summaries]
     billed_tokens = [int(item.get("billed_tokens", 0) or 0) for item in instance_summaries]
     costs = [float(item.get("cost_usd", 0.0) or 0.0) for item in instance_summaries]
+    file_recall_at_1_values = [
+        float(item.get("file_recall_at_1"))
+        for item in instance_summaries
+        if item.get("file_recall_at_1") is not None
+    ]
+    function_recall_at_1_values = [
+        float(item.get("function_recall_at_1"))
+        for item in instance_summaries
+        if item.get("function_recall_at_1") is not None
+    ]
+    if not function_recall_at_1_values:
+        # Backward-compatible fallback for summaries produced before function aliases were added.
+        function_recall_at_1_values = [
+            float(item.get("entity_recall_at_1"))
+            for item in instance_summaries
+            if item.get("entity_recall_at_1") is not None
+        ]
 
     correct_values = [item.get("correct") for item in instance_summaries if item.get("correct") is not None]
+    function_hit_values = [
+        bool(item.get("function_hit_any"))
+        for item in instance_summaries
+        if item.get("function_hit_any") is not None
+    ]
+    if not function_hit_values:
+        function_hit_values = [
+            bool(item.get("entity_hit_any"))
+            for item in instance_summaries
+            if item.get("entity_hit_any") is not None
+        ]
     pass_rate = None
     if correct_values:
         pass_rate = sum(1 for value in correct_values if value) / len(correct_values)
@@ -39,6 +67,31 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
         "total_instances": len(instance_summaries),
         "success_count": success_count,
         "pass_rate": pass_rate,
+        "acc_at_1": (
+            sum(1 for value in file_recall_at_1_values if value >= 1.0) / len(file_recall_at_1_values)
+            if file_recall_at_1_values
+            else None
+        ),
+        "file_recall_at_1": (
+            sum(file_recall_at_1_values) / len(file_recall_at_1_values)
+            if file_recall_at_1_values
+            else None
+        ),
+        "function_hit_rate": (
+            sum(1 for value in function_hit_values if value) / len(function_hit_values)
+            if function_hit_values
+            else None
+        ),
+        "function_acc_at_1": (
+            sum(1 for value in function_recall_at_1_values if value >= 1.0) / len(function_recall_at_1_values)
+            if function_recall_at_1_values
+            else None
+        ),
+        "function_recall_at_1": (
+            sum(function_recall_at_1_values) / len(function_recall_at_1_values)
+            if function_recall_at_1_values
+            else None
+        ),
         "avg_steps": _avg(steps),
         "p50_steps": _percentile(steps, 50),
         "p90_steps": _percentile(steps, 90),

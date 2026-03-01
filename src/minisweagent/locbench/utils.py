@@ -386,11 +386,14 @@ def compute_locbench_metrics(
     metrics: dict[str, Any] = {
         "file_hit_any": file_hit_any,
         "entity_hit_any": entity_hit_any,
+        # Keep explicit function-level aliases for reporting readability.
+        "function_hit_any": entity_hit_any,
         "correct": bool(file_hit_any or entity_hit_any),
     }
     for k in ks:
         metrics[f"file_recall_at_{k}"] = _recall_at_k(gt_files, found_files, k)
         metrics[f"entity_recall_at_{k}"] = _recall_at_k(gt_entities, found_entities, k)
+        metrics[f"function_recall_at_{k}"] = metrics[f"entity_recall_at_{k}"]
     return metrics
 
 

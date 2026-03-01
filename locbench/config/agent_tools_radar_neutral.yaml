@@ -20,7 +20,8 @@ agent:
     Semantic file-level radar search.
     This tool returns candidate file paths and scores only. It never returns code snippets.
 
-    Use it when the task description does not specify exact file paths.
+    Default behavior: start with file_radar_search first.
+    Exception: if the issue already provides an exact, high-confidence target file path, you may start with direct bash read.
     After radar results, use rg/cat/sed to inspect candidate files before final output.
     Note: This is a special API call, not a shell binary. It cannot be piped or chained.
 
@@ -90,6 +91,9 @@ agent:
     ## Rules
     - Read-only work: do not modify files.
     - Prefer fast search tools like rg and targeted file reads.
+    - Default Map Rule: unless the issue provides an exact, high-confidence target file path, your first action MUST be file_radar_search.
+    - Anti-Laziness Rule: after file_radar_search (with 2+ candidates), you MUST inspect at least one non-rank-1 candidate from ranks 2-5 before submitting.
+    - Pivot Rule: if inspected candidates are weak/ambiguous/conflicting, you MUST run a second file_radar_search with a rewritten query using concrete symbols, errors, or business terms.
     - After file_radar_search, you may use list_symbols on candidate files to inspect structure before deep reading.
     - list_symbols does NOT replace bash verification. You still need at least one bash read on a candidate file.
     - If you used file_radar_search and got candidate files, you MUST inspect at least one candidate file via bash before final output.
