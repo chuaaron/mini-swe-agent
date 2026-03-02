@@ -90,6 +90,42 @@ def test_format_results_shows_support_for_multi_query(tmp_path: Path):
     assert 'Found 1 candidate files for "q1 | q2 | q3":' in output
 
 
+def test_format_results_blind_alpha_hides_score_and_sorts_paths(tmp_path: Path):
+    tool = _build_tool(tmp_path, display_mode="blind_alpha")
+    output = tool._format_results(
+        "auth",
+        [
+            {"path": "src/zeta.py", "score": 0.95, "evidence_count": 3},
+            {"path": "src/alpha.py", "score": 0.12, "evidence_count": 2},
+        ],
+        auto_skeleton={"enabled": False, "files": []},
+    )
+
+    assert "score:" not in output
+    assert output.index("- src/alpha.py") < output.index("- src/zeta.py")
+
+
+def test_format_results_clustered_groups_by_directory_without_scores(tmp_path: Path):
+    tool = _build_tool(tmp_path, display_mode="clustered")
+    output = tool._format_results(
+        "auth",
+        [
+            {"path": "src/auth/session.py", "score": 0.40, "evidence_count": 2},
+            {"path": "tests/test_auth.py", "score": 0.97, "evidence_count": 5},
+            {"path": "src/auth/login.py", "score": 0.91, "evidence_count": 4},
+            {"path": "src/core/router.py", "score": 0.82, "evidence_count": 3},
+        ],
+        auto_skeleton={"enabled": False, "files": []},
+    )
+
+    assert "score:" not in output
+    assert "[DIR] tests/" in output
+    assert "[DIR] src/auth/" in output
+    assert output.index("[DIR] tests/") < output.index("[DIR] src/auth/") < output.index("[DIR] src/core/")
+    assert output.index("src/auth/login.py") < output.index("src/auth/session.py")
+    assert "📂" not in output
+
+
 def test_effective_queries_auto_expands_single_query(tmp_path: Path):
     tool = _build_tool(tmp_path, auto_query_expansion_enabled=True, auto_query_expansion_max_queries=3)
     parsed = FileRadarSearchArgs.from_raw({"query": "switch socket on off async_turn_on fritzbox"})

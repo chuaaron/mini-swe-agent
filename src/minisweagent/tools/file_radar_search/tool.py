@@ -184,6 +184,11 @@ class FileRadarSearchConfig:
     auto_skeleton_query_aware: bool = True
     auto_query_expansion_enabled: bool = True
     auto_query_expansion_max_queries: int = 3
+    # Candidate list presentation:
+    # - ranked: keep retrieval order + score
+    # - blind_alpha: hide score/rank; sort by path alphabetically
+    # - clustered: group by directory (directory order by hidden best score)
+    display_mode: str = "ranked"
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "FileRadarSearchConfig":
@@ -369,6 +374,8 @@ class FileRadarSearchTool:
             raise ValueError("auto_skeleton_max_symbols_per_file must be between 0 and 500")
         if not 1 <= int(self.config.auto_query_expansion_max_queries) <= 8:
             raise ValueError("auto_query_expansion_max_queries must be between 1 and 8")
+        if str(self.config.display_mode or "").strip().lower() not in {"ranked", "blind_alpha", "clustered"}:
+            raise ValueError("display_mode must be one of: ranked, blind_alpha, clustered")
         self.index_root = Path(os.path.expanduser(self.config.index_root)).resolve()
         self.chunker = SlidingChunker(self.config.chunk_size, self.config.overlap)
         self.embedder = self._build_embedder()
@@ -515,7 +522,13 @@ class FileRadarSearchTool:
                 auto_skeleton_query = " ".join(effective_queries)
                 auto_skeleton = self._build_auto_skeleton(query=auto_skeleton_query, repo_root=repo_root, results=structured)
                 query_display = effective_queries[0] if len(effective_queries) == 1 else " | ".join(effective_queries)
-                formatted = self._format_results(query_display, structured, auto_skeleton=auto_skeleton)
+                display_mode = self._normalized_display_mode()
+                formatted = self._format_results(
+                    query_display,
+                    structured,
+                    auto_skeleton=auto_skeleton,
+                    display_mode=display_mode,
+                )
 
                 data = {
                     "query": parsed.query,
@@ -524,6 +537,7 @@ class FileRadarSearchTool:
                     "query_count": len(effective_queries),
                     "query_expanded": query_expanded,
                     "fusion_mode": "single_query" if len(effective_queries) == 1 else "multi_query_rrf_support",
+                    "display_mode": display_mode,
                     "topk_files": parsed.topk_files,
                     "topk_blocks": parsed.topk_blocks,
                     "returned": len(structured),
@@ -672,34 +686,151 @@ class FileRadarSearchTool:
         )
         return fused
 
-    def _format_results(self, query: str, results: list[dict[str, Any]], *, auto_skeleton: dict[str, Any]) -> str:
+    def _normalized_display_mode(self) -> str:
+        mode = str(self.config.display_mode or "ranked").strip().lower()
+        return mode if mode in {"ranked", "blind_alpha", "clustered"} else "ranked"
+
+    def _result_dir(self, path: str) -> str:
+        parent = Path(path).parent.as_posix()
+        return "." if parent in {"", "."} else parent
+
+    def _clustered_display_order(self, results: list[dict[str, Any]]) -> tuple[list[tuple[str, list[dict[str, Any]]]], list[str]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in results:
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            grouped.setdefault(self._result_dir(path), []).append(item)
+
+        for items in grouped.values():
+            items.sort(key=lambda entry: str(entry.get("path") or "").lower())
+
+        def _dir_key(directory: str) -> tuple[float, str]:
+            items = grouped.get(directory, [])
+            best_score = max(float(item.get("score", 0.0) or 0.0) for item in items) if items else 0.0
+            return (-best_score, directory.lower())
+
+        ordered_dirs = sorted(grouped.keys(), key=_dir_key)
+        grouped_ordered = [(directory, grouped[directory]) for directory in ordered_dirs]
+        flattened_paths = [str(item.get("path") or "") for _, items in grouped_ordered for item in items if item.get("path")]
+        return grouped_ordered, flattened_paths
+
+    def _render_candidate_entry(
+        self,
+        item: dict[str, Any],
+        *,
+        index: int | None = None,
+        include_score: bool,
+        bullet_prefix: str = "",
+    ) -> list[str]:
+        path = str(item.get("path") or "")
+        evidence_count = int(item.get("evidence_count", 0) or 0)
+        if index is None:
+            if include_score:
+                score = float(item.get("score", 0.0) or 0.0)
+                first = f"{bullet_prefix}- {path} (score: {score:.2f}, evidence: {evidence_count})"
+            else:
+                first = f"{bullet_prefix}- {path} (evidence: {evidence_count})"
+        else:
+            if include_score:
+                score = float(item.get("score", 0.0) or 0.0)
+                first = f"{bullet_prefix}{index}. {path} (score: {score:.2f}, evidence: {evidence_count})"
+            else:
+                first = f"{bullet_prefix}{index}. {path} (evidence: {evidence_count})"
+        lines = [first]
+        support_count = item.get("support_count")
+        query_count = item.get("query_count")
+        if isinstance(support_count, int) and isinstance(query_count, int) and query_count > 1:
+            lines.append(f"{bullet_prefix}  support: {support_count}/{query_count} queries")
+        return lines
+
+    def _order_auto_skeleton_files(self, files: list[dict[str, Any]], *, display_paths: list[str]) -> list[dict[str, Any]]:
+        by_path: dict[str, dict[str, Any]] = {}
+        for item in files:
+            path = str(item.get("path") or "")
+            if path:
+                by_path[path] = item
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for path in display_paths:
+            if path in by_path and path not in seen:
+                ordered.append(by_path[path])
+                seen.add(path)
+        for item in files:
+            path = str(item.get("path") or "")
+            if not path or path in seen:
+                continue
+            ordered.append(item)
+            seen.add(path)
+        return ordered
+
+    def _format_results(
+        self,
+        query: str,
+        results: list[dict[str, Any]],
+        *,
+        auto_skeleton: dict[str, Any],
+        display_mode: str | None = None,
+    ) -> str:
+        mode = (display_mode or self._normalized_display_mode()).strip().lower()
+        if mode not in {"ranked", "blind_alpha", "clustered"}:
+            mode = "ranked"
+
         lines = [f'Found {len(results)} candidate files for "{query}":', ""]
-        for idx, item in enumerate(results, start=1):
-            lines.append(
-                f"{idx}. {item['path']} (score: {item['score']:.2f}, evidence: {item['evidence_count']})"
-            )
-            support_count = item.get("support_count")
-            query_count = item.get("query_count")
-            if isinstance(support_count, int) and isinstance(query_count, int) and query_count > 1:
-                lines.append(f"   support: {support_count}/{query_count} queries")
+        display_paths: list[str] = [str(item.get("path") or "") for item in results if item.get("path")]
+        if mode == "ranked":
+            for idx, item in enumerate(results, start=1):
+                lines.extend(self._render_candidate_entry(item, index=idx, include_score=True))
+        elif mode == "blind_alpha":
+            alpha_items = sorted(results, key=lambda item: str(item.get("path") or "").lower())
+            display_paths = [str(item.get("path") or "") for item in alpha_items if item.get("path")]
+            for item in alpha_items:
+                lines.extend(self._render_candidate_entry(item, include_score=False))
+        else:
+            clusters, clustered_paths = self._clustered_display_order(results)
+            display_paths = clustered_paths
+            for directory, items in clusters:
+                dir_label = "./" if directory == "." else f"{directory}/"
+                lines.append(f"[DIR] {dir_label}")
+                for item in items:
+                    lines.extend(self._render_candidate_entry(item, include_score=False, bullet_prefix="  "))
+                lines.append("")
 
         directory_tree = auto_skeleton.get("directory_tree", "")
         cross_deps = auto_skeleton.get("cross_file_deps", {})
-        if directory_tree:
-            lines.extend(["", "── Directory Context ──", directory_tree])
+        if directory_tree and mode != "clustered":
+            lines.extend(["", "-- Directory Context --", directory_tree])
         if cross_deps:
-            lines.extend(["", "── File Dependencies ──"])
-            for src, dsts in cross_deps.items():
-                lines.append(f"  {src} → imports from → {', '.join(dsts)}")
+            lines.extend(["", "-- Dependencies --"])
+            dep_items = sorted(
+                cross_deps.items(),
+                key=lambda item: (-len(item[1]), str(item[0]).lower()),
+            )
+            max_dep_sources = 12
+            max_dep_targets = 6
+            for src, dsts in dep_items[:max_dep_sources]:
+                shown = list(dsts)[:max_dep_targets]
+                suffix = f", ... (+{len(dsts) - len(shown)})" if len(dsts) > len(shown) else ""
+                lines.append(f"  {src} -> imports -> {', '.join(shown)}{suffix}")
+            if len(dep_items) > max_dep_sources:
+                lines.append(f"  ... ({len(dep_items) - max_dep_sources} more dependency sources)")
 
         files = auto_skeleton.get("files", [])
+        if isinstance(files, list) and files:
+            files = self._order_auto_skeleton_files(files, display_paths=display_paths)
         if auto_skeleton.get("enabled") and files:
-            lines.extend(["", f"Auto skeleton (Top-{len(files)}, balanced folded, no code body):"])
+            if mode == "ranked":
+                lines.extend(["", f"Auto skeleton (Top-{len(files)}, balanced folded, no code body):"])
+            else:
+                lines.extend(["", f"Auto skeleton ({len(files)} candidates, balanced folded, no code body):"])
             for item in files:
-                lines.append(f"[{item['rank']}] {item['path']}")
+                if mode == "ranked":
+                    lines.append(f"[{item['rank']}] {item['path']}")
+                else:
+                    lines.append(f"* {item['path']}")
                 cg = item.get("call_graph", {})
                 rg = item.get("reverse_graph", {})
-                lines.append("🎯 Anchors:")
+                lines.append("[ANCHORS]")
                 anchor_items = item.get("anchors_items", [])
                 anchor_names = item.get("anchor_names", [])
                 if isinstance(anchor_items, list) and anchor_items:
@@ -713,7 +844,7 @@ class FileRadarSearchTool:
                     anchors_preview = item.get("anchors_preview", "")
                     lines.append(f"    - {anchors_preview or '-'}")
 
-                lines.append("🧭 Context Glimpse:")
+                lines.append("[GLIMPSE]")
                 glimpse_items = item.get("context_glimpse_items", [])
                 glimpse_names = item.get("context_glimpse_names", [])
                 if isinstance(glimpse_items, list) and glimpse_items:
@@ -727,7 +858,7 @@ class FileRadarSearchTool:
                     context_glimpse_preview = item.get("context_glimpse_preview", "")
                     lines.append(f"    - {context_glimpse_preview or '-'}")
                 lines.append(
-                    "📦 Folded: "
+                    "[FOLDED] "
                     f"symbols={int(item.get('folded_symbols_count', 0))}, "
                     f"imports={int(item.get('folded_imports_count', 0))} "
                     f"(use `@tool list_symbols --file \"{item['path']}\"` to expand)"
@@ -736,20 +867,22 @@ class FileRadarSearchTool:
                 if isinstance(primary_anchor, dict) and primary_anchor.get("start") and primary_anchor.get("end"):
                     start = int(primary_anchor["start"])
                     end = int(primary_anchor["end"])
-                    lines.append(f"➡ Next: sed -n '{start},{end}p' {item['path']}")
+                    lines.append(f"=> NEXT: sed -n '{start},{end}p' {item['path']}")
                 else:
-                    lines.append(f"➡ Next: @tool list_symbols --file \"{item['path']}\"")
+                    lines.append(f"=> NEXT: @tool list_symbols --file \"{item['path']}\"")
                 if item.get("error"):
                     lines.append(f"skeleton_error: {item['error']}")
                 lines.append("")
 
             lines.extend(
                 [
-                    "💡 Next-Step Playbook:",
-                    "1) Anchor First: If you see 🎯 anchors, read that exact range first with `sed -n 'Lstart,Lendp' <path>`.",
+                    "Next-Step Playbook:",
+                    "1) Anchor First: If you see [ANCHORS], read that exact range first with `sed -n 'Lstart,Lendp' <path>`.",
                     "2) Expand When Needed: If anchors are '-' or still ambiguous, call `@tool list_symbols --file <path>` and then read one chosen range with `sed`.",
                     (
                         f"3) Re-query If Needed: If Top-{len(files)} still looks wrong, refine the query and call `file_radar_search` again."
+                        if mode == "ranked"
+                        else "3) Re-query If Needed: If these candidates still look wrong, refine the query and call `file_radar_search` again."
                     ),
                     "",
                     "Tip: Final submission is safer after the target file has been inspected via bash read or list_symbols expansion.",
@@ -896,7 +1029,12 @@ class FileRadarSearchTool:
             files.append(base)
 
         file_paths = [f["path"] for f in files if f.get("path")]
-        cross_file_deps = find_cross_file_deps(repo_root, file_paths) if len(file_paths) > 1 else {}
+        all_candidate_paths = [
+            str(item.get("path") or "").strip()
+            for item in results
+            if isinstance(item, dict) and str(item.get("path") or "").strip()
+        ]
+        cross_file_deps = find_cross_file_deps(repo_root, all_candidate_paths) if len(all_candidate_paths) > 1 else {}
         directory_tree = build_focused_tree(file_paths) if file_paths else ""
 
         return {

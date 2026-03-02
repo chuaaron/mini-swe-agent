@@ -94,6 +94,13 @@ agent:
     - Read-only work: do not modify files.
     - MUST start with file_radar_search unless the task provides exact file paths.
     - Do NOT start with bash exploration before file_radar_search.
+    - Anti-Laziness Rule: after file_radar_search (with 2+ candidates), you MUST inspect at least 2 candidate files before submitting.
+    - Cross-Module Heuristic: when unsure, prefer checking candidates from different directories/modules (soft guidance, not a hard blocker).
+    - Clustered Radar Navigation: when results are clustered by directory, first prioritize directories with the most candidate files, then prioritize files that appear as core dependencies in "File Dependencies".
+    - Pivot Rule (Mandatory Re-query): if first radar results are weak/ambiguous/conflicting, you MUST run a second file_radar_search with a rewritten query before final submission.
+    - Weak/ambiguous/conflicting means any of: (a) top candidates are mostly generic framework files, (b) anchors are "-" or not aligned with the issue, (c) inspected files do not explain the bug, (d) radar returns 0 candidates.
+    - Rewritten query MUST be materially different from the first query (not a light paraphrase). Prefer concrete symbols, exact error strings, protocol names, business objects, or config keywords.
+    - Unless the issue provides an exact, high-confidence target file path and your first radar+read already confirms it, you SHOULD complete at least 2 radar calls before submission.
     - After file_radar_search, you may use list_symbols on candidate files to inspect structure before deep reading.
     - list_symbols does NOT replace bash verification. You still need at least one bash read on a candidate file.
     - After file_radar_search, you MUST inspect at least one returned candidate file via bash before final output.

@@ -83,11 +83,11 @@ def test_auto_skeleton_top3_compact_output(tmp_path: Path):
 
     output = tool._format_results("auth token login", candidates, auto_skeleton=auto)
     assert "Auto skeleton (Top-3, balanced folded, no code body):" in output
-    assert "🎯 Anchors:" in output
-    assert "🧭 Context Glimpse:" in output
-    assert "📦 Folded:" in output
-    assert "➡ Next:" in output
-    assert "💡 Next-Step Playbook:" in output
+    assert "[ANCHORS]" in output
+    assert "[GLIMPSE]" in output
+    assert "[FOLDED]" in output
+    assert "=> NEXT:" in output
+    assert "Next-Step Playbook:" in output
     assert "Anchor First" in output
     assert "Expand When Needed" in output
     assert "Re-query If Needed" in output

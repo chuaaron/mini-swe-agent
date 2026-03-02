@@ -131,6 +131,43 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
             premature_submit_instances / radar_called_count if radar_called_count else None
         )
 
+        single_call_instances = [
+            item for item in radar_called_instances if int(item.get("radar_tool_calls", 0) or 0) == 1
+        ]
+        multi_call_instances = [
+            item for item in radar_called_instances if int(item.get("radar_tool_calls", 0) or 0) >= 2
+        ]
+        single_radar_call_count = len(single_call_instances)
+        multi_radar_call_count = len(multi_call_instances)
+        cross_dir_inspected_count = sum(1 for item in radar_called_instances if bool(item.get("radar_cross_dir_inspected")))
+        first_candidate_fixation_count = sum(
+            1 for item in radar_called_instances if bool(item.get("radar_first_candidate_fixated"))
+        )
+        fixation_applicable_instances = [
+            item for item in radar_called_instances if bool(item.get("radar_anti_laziness_applicable"))
+        ]
+
+        def _is_success(entry: dict[str, Any]) -> bool:
+            if entry.get("correct") is not None:
+                return bool(entry.get("correct"))
+            return str(entry.get("exit_status") or "") == "Submitted"
+
+        single_call_success_rate = (
+            sum(1 for item in single_call_instances if _is_success(item)) / single_radar_call_count
+            if single_radar_call_count
+            else None
+        )
+        second_call_success_rate = (
+            sum(1 for item in multi_call_instances if _is_success(item)) / multi_radar_call_count
+            if multi_radar_call_count
+            else None
+        )
+        second_radar_call_success_delta = (
+            second_call_success_rate - single_call_success_rate
+            if second_call_success_rate is not None and single_call_success_rate is not None
+            else None
+        )
+
         stats.update(
             {
                 "radar_called_count": radar_called_count,
@@ -148,6 +185,29 @@ def _build_overall_stats(instance_summaries: list[dict[str, Any]]) -> dict[str, 
                 "blocked_submission_count": blocked_submission_count,
                 "avg_tool_output_chars": avg_tool_output_chars,
                 "premature_submit_rate": premature_submit_rate,
+                "single_radar_call_count": single_radar_call_count,
+                "single_radar_call_rate": (
+                    single_radar_call_count / radar_called_count if radar_called_count else None
+                ),
+                "multi_radar_call_count": multi_radar_call_count,
+                "cross_dir_inspected_count": cross_dir_inspected_count,
+                "cross_dir_inspection_rate": (
+                    cross_dir_inspected_count / radar_called_count if radar_called_count else None
+                ),
+                "first_candidate_fixation_count": first_candidate_fixation_count,
+                "first_candidate_fixation_rate": (
+                    first_candidate_fixation_count / radar_called_count if radar_called_count else None
+                ),
+                "first_candidate_fixation_applicable_count": len(fixation_applicable_instances),
+                "first_candidate_fixation_applicable_rate": (
+                    sum(1 for item in fixation_applicable_instances if bool(item.get("radar_first_candidate_fixated")))
+                    / len(fixation_applicable_instances)
+                    if fixation_applicable_instances
+                    else None
+                ),
+                "single_radar_call_success_rate": single_call_success_rate,
+                "second_radar_call_success_rate": second_call_success_rate,
+                "second_radar_call_success_delta": second_radar_call_success_delta,
             }
         )
 

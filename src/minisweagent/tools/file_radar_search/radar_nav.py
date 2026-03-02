@@ -107,7 +107,7 @@ def build_focused_tree(relevant_files: list[str]) -> str:
     for d in sorted(dirs):
         lines.append(f"  {d}/")
         for name in sorted(dirs[d]):
-            lines.append(f"    {name} ◀")
+            lines.append(f"    - {name}")
     return "\n".join(lines)
 
 

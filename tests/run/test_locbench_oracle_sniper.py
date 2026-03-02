@@ -223,3 +223,52 @@ def test_run_summary_computes_anti_laziness_metrics():
     assert stats["anti_laziness_compliant_count"] == 1
     assert stats["anti_laziness_violation_count"] == 1
     assert stats["anti_laziness_compliance_rate"] == pytest.approx(0.5)
+
+
+def test_run_summary_computes_radar_behavior_metrics():
+    summaries = [
+        {
+            "instance_id": "a",
+            "exit_status": "Submitted",
+            "correct": False,
+            "radar_called": True,
+            "radar_tool_calls": 1,
+            "radar_cross_dir_inspected": False,
+            "radar_first_candidate_fixated": True,
+            "radar_anti_laziness_applicable": True,
+        },
+        {
+            "instance_id": "b",
+            "exit_status": "Submitted",
+            "correct": True,
+            "radar_called": True,
+            "radar_tool_calls": 2,
+            "radar_cross_dir_inspected": True,
+            "radar_first_candidate_fixated": False,
+            "radar_anti_laziness_applicable": True,
+        },
+        {
+            "instance_id": "c",
+            "exit_status": "Submitted",
+            "correct": True,
+            "radar_called": True,
+            "radar_tool_calls": 1,
+            "radar_cross_dir_inspected": True,
+            "radar_first_candidate_fixated": False,
+            "radar_anti_laziness_applicable": False,
+        },
+    ]
+
+    stats = _build_overall_stats(summaries)
+
+    assert stats["single_radar_call_count"] == 2
+    assert stats["single_radar_call_rate"] == pytest.approx(2 / 3)
+    assert stats["cross_dir_inspected_count"] == 2
+    assert stats["cross_dir_inspection_rate"] == pytest.approx(2 / 3)
+    assert stats["first_candidate_fixation_count"] == 1
+    assert stats["first_candidate_fixation_rate"] == pytest.approx(1 / 3)
+    assert stats["first_candidate_fixation_applicable_count"] == 2
+    assert stats["first_candidate_fixation_applicable_rate"] == pytest.approx(0.5)
+    assert stats["single_radar_call_success_rate"] == pytest.approx(0.5)
+    assert stats["second_radar_call_success_rate"] == pytest.approx(1.0)
+    assert stats["second_radar_call_success_delta"] == pytest.approx(0.5)

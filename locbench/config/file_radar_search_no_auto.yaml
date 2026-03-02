@@ -11,6 +11,11 @@ trust_remote_code: true
 index_root: "/home/chaihongzheng/workspace/locbench/mini-swe-agent/locbench/indexes/llamaindex_code_custom_40_15_800"
 max_file_size: 524288
 aggregation: hybrid
+# Radar 展示模式：
+# - ranked: 按检索分数排序并显示 score
+# - blind_alpha: 候选按路径字母序展示，不显示 score
+# - clustered: 按目录聚类展示（目录顺序由该目录隐藏最高分决定），不显示文件 score
+display_mode: clustered
 # 索引兼容性校验模式：
 # - strict: 包含 repo_fingerprint(路径敏感)
 # - static: 忽略路径指纹，仅按 repo_slug/base_commit/embedding/chunk 参数校验
