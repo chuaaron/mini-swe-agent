@@ -86,7 +86,13 @@ class ProgressTrackingAgent(ToolAgent):
         self.instance_id = instance_id
         self.enforce_tool_verification = enforce_tool_verification
         self.disallow_tools = disallow_tools
-        self.oracle_files = sorted({item.strip() for item in (oracle_files or []) if str(item).strip()})
+        self.oracle_files = sorted(
+            {
+                self._normalize_oracle_like_path(str(item))
+                for item in (oracle_files or [])
+                if str(item).strip() and self._normalize_oracle_like_path(str(item))
+            }
+        )
 
         self.needs_verification = False
         self.candidate_files: set[str] = set()
@@ -141,6 +147,15 @@ class ProgressTrackingAgent(ToolAgent):
         if self.oracle_files:
             self.candidate_files = set(self.oracle_files)
             self.needs_verification = self.enforce_tool_verification and bool(self.candidate_files)
+
+    @staticmethod
+    def _normalize_oracle_like_path(path: str) -> str:
+        cleaned = str(path or "").strip().replace("\\", "/")
+        while cleaned.startswith("./"):
+            cleaned = cleaned[2:]
+        if not cleaned:
+            return ""
+        return Path(cleaned).as_posix()
 
     def _candidate_preview_lines(self, *, include_inspected: bool = False) -> str:
         candidates = sorted(self.candidate_files)
@@ -251,6 +266,25 @@ class ProgressTrackingAgent(ToolAgent):
             f"{lines}\n"
             "Radar candidates and read history:\n"
             f"{self._candidate_preview_lines(include_inspected=True)}"
+        )
+        if self._strict_recovery_mode:
+            return self._strict_recovery_message(base)
+        return base
+
+    def _oracle_scope_interception_message(self, outside_hints: list[str]) -> str:
+        outside_lines = "\n".join(f"- {item}" for item in outside_hints)
+        allowed_preview = sorted(self.oracle_files)[:10]
+        allowed_lines = "\n".join(f"- {item}" for item in allowed_preview) if allowed_preview else "- <none>"
+        if len(self.oracle_files) > len(allowed_preview):
+            allowed_lines += f"\n- ... ({len(self.oracle_files) - len(allowed_preview)} more)"
+        base = (
+            "SYSTEM_INTERCEPTION: Oracle Scope Violation.\n"
+            "This is not a JSON formatting error.\n"
+            "In Oracle-Sniper mode, submitted file_hint values must stay within provided Oracle files.\n"
+            "Out-of-scope file_hint values:\n"
+            f"{outside_lines}\n"
+            "Allowed Oracle files:\n"
+            f"{allowed_lines}"
         )
         if self._strict_recovery_mode:
             return self._strict_recovery_message(base)
@@ -488,6 +522,21 @@ class ProgressTrackingAgent(ToolAgent):
         if "/" in hint:
             return any(item.endswith(hint) for item in observed)
         return False
+
+    def _is_hint_in_oracle_scope(self, hint: str) -> bool:
+        if not self.oracle_files:
+            return True
+        normalized_hint = self._normalize_oracle_like_path(hint)
+        if not normalized_hint:
+            return False
+        oracle_set = {self._normalize_oracle_like_path(item) for item in self.oracle_files}
+        if normalized_hint in oracle_set:
+            return True
+        if any(item.endswith(normalized_hint) or normalized_hint.endswith(item) for item in oracle_set):
+            return True
+        basename = Path(normalized_hint).name
+        basename_matches = [item for item in oracle_set if Path(item).name == basename]
+        return bool(basename_matches) and len(basename_matches) == 1
 
     def _refresh_radar_anti_laziness_state(self) -> None:
         if not self.radar_anti_laziness_applicable:
@@ -753,6 +802,12 @@ class ProgressTrackingAgent(ToolAgent):
             if uninspected_hints:
                 self._register_interception()
                 raise FormatError(self._submission_read_interception_message(uninspected_hints))
+        if self.oracle_files:
+            hints = self._extract_submission_file_hints(submission_payload)
+            outside_hints = [hint for hint in hints if not self._is_hint_in_oracle_scope(hint)]
+            if outside_hints:
+                self._register_interception()
+                raise FormatError(self._oracle_scope_interception_message(outside_hints))
         self._reset_interception_guard()
         raise Submitted(submission_payload)
 
@@ -1081,6 +1136,7 @@ def _extract_edit_function_files(edit_functions: Any) -> list[str]:
 def _extract_oracle_files(record: dict[str, Any]) -> tuple[list[str], bool]:
     candidates = _extract_patch_files(str(record.get("patch") or ""))
     candidates.extend(_extract_edit_function_files(record.get("edit_functions")))
+    candidates.extend(_extract_edit_function_files(record.get("added_functions")))
 
     deduped: list[str] = []
     seen: set[str] = set()
@@ -1419,6 +1475,15 @@ def _process_instance(
             summary_record["oracle_verification_satisfied"] = (
                 verification_satisfied if oracle_sniper_mode and oracle_file_provided else None
             )
+        for key in (
+            "submission_has_functions_key",
+            "submitted_function_count",
+            "submitted_unique_function_count",
+            "submitted_file_hint_count",
+            "submitted_qualified_function_count",
+            "submitted_qualified_function_ratio",
+        ):
+            summary_record[key] = output_record.get(key)
         for key, value in metrics.items():
             if key != "correct":
                 summary_record[key] = value

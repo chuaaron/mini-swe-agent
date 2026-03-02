@@ -857,6 +857,9 @@ class FileRadarSearchTool:
                 else:
                     context_glimpse_preview = item.get("context_glimpse_preview", "")
                     lines.append(f"    - {context_glimpse_preview or '-'}")
+                scope_summary = str(item.get("scope_summary") or "").strip()
+                if scope_summary:
+                    lines.append(f"[SCOPE] {scope_summary}")
                 lines.append(
                     "[FOLDED] "
                     f"symbols={int(item.get('folded_symbols_count', 0))}, "
@@ -879,6 +882,7 @@ class FileRadarSearchTool:
                     "Next-Step Playbook:",
                     "1) Anchor First: If you see [ANCHORS], read that exact range first with `sed -n 'Lstart,Lendp' <path>`.",
                     "2) Expand When Needed: If anchors are '-' or still ambiguous, call `@tool list_symbols --file <path>` and then read one chosen range with `sed`.",
+                    "   Also expand when [SCOPE] indicates many methods/functions (for example methods>=10).",
                     (
                         f"3) Re-query If Needed: If Top-{len(files)} still looks wrong, refine the query and call `file_radar_search` again."
                         if mode == "ranked"
@@ -973,6 +977,7 @@ class FileRadarSearchTool:
             symbols = [item for item in data.get("symbols", []) if isinstance(item, dict) and item.get("name")]
             base["import_count"] = len(imports)
             base["symbol_count"] = len(symbols)
+            base["scope_summary"] = self._summarize_symbol_scope(symbols)
 
             call_graph: dict[str, list[str]] = {}
             full_path = repo_root / path
@@ -1160,6 +1165,34 @@ class FileRadarSearchTool:
             return False
         name = str(symbol.get("name") or "").lower()
         return any(token in name for token in query_tokens)
+
+    def _summarize_symbol_scope(self, symbols: list[dict[str, Any]]) -> str:
+        if not symbols:
+            return ""
+        kind_counts: dict[str, int] = {}
+        method_by_class: dict[str, int] = {}
+        for symbol in symbols:
+            kind = str(symbol.get("kind") or "symbol").strip().lower()
+            if not kind:
+                kind = "symbol"
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+            if kind != "method":
+                continue
+            name = str(symbol.get("name") or "")
+            class_name = name.split(".", 1)[0].strip() if "." in name else ""
+            if not class_name:
+                continue
+            method_by_class[class_name] = method_by_class.get(class_name, 0) + 1
+
+        class_count = int(kind_counts.get("class", 0))
+        method_count = int(kind_counts.get("method", 0))
+        function_count = int(kind_counts.get("function", 0))
+        summary_parts = [f"classes={class_count}", f"methods={method_count}", f"functions={function_count}"]
+        if method_by_class:
+            sorted_classes = sorted(method_by_class.items(), key=lambda item: (-item[1], item[0].lower()))
+            top_classes = ", ".join(f"{name}({count})" for name, count in sorted_classes[:2])
+            summary_parts.append(f"top_method_classes={top_classes}")
+        return ", ".join(summary_parts)
 
     def _format_symbol_preview(self, symbol: dict[str, Any], *, include_doc: bool = False) -> str:
         name = self._clean_preview_text(str(symbol.get("name") or ""))

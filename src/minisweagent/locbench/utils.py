@@ -51,6 +51,64 @@ def _normalize_function_items(value: Any) -> list[dict[str, str]]:
     return items
 
 
+def _index_record(index: dict[str, list[dict[str, str]]], key: str, record: dict[str, str]) -> None:
+    cleaned = key.strip()
+    if not cleaned:
+        return
+    bucket = index.setdefault(cleaned, [])
+    for existing in bucket:
+        if existing.get("file") == record.get("file") and existing.get("qualname") == record.get("qualname"):
+            return
+    bucket.append(record)
+
+
+def _candidate_id(record: dict[str, str]) -> tuple[str, str]:
+    return str(record.get("file") or ""), str(record.get("qualname") or "")
+
+
+def _gather_function_candidates(index: dict[str, list[dict[str, str]]], func: str) -> list[dict[str, str]]:
+    query = str(func or "").strip()
+    if not query:
+        return []
+    keys: list[str] = [query]
+    if "." in query:
+        parts = [part for part in query.split(".") if part]
+        if len(parts) >= 2:
+            keys.append(".".join(parts[-2:]))
+        keys.append(parts[-1])
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for key in keys:
+        for record in index.get(key, []):
+            rec_id = _candidate_id(record)
+            if rec_id in seen:
+                continue
+            seen.add(rec_id)
+            deduped.append(record)
+    return deduped
+
+
+def _function_match_rank(query_func: str, record: dict[str, str]) -> tuple[int, int]:
+    query = str(query_func or "").strip()
+    qualname = str(record.get("qualname") or "").strip()
+    name = str(record.get("name") or "").strip()
+    if not query:
+        return 4, 0
+    if query == qualname:
+        return 0, 0
+    if qualname and qualname.endswith(f".{query}"):
+        return 1, max(0, len(qualname) - len(query))
+    if "." in query and "." in qualname:
+        query_tail2 = ".".join(query.split(".")[-2:])
+        qual_tail2 = ".".join(qualname.split(".")[-2:])
+        if query_tail2 == qual_tail2:
+            return 2, 0
+    if query.rsplit(".", 1)[-1] == name:
+        # Query used only leaf name or mismatched class prefix.
+        return 3, 0 if "." in query else 1
+    return 4, 0
+
+
 def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
     index: dict[str, list[dict[str, str]]] = {}
     root = Path(repo_root)
@@ -79,7 +137,8 @@ def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
                         "name": cls_name,
                         "qualname": qualname,
                     }
-                    index.setdefault(cls_name, []).append(record)
+                    _index_record(index, cls_name, record)
+                    _index_record(index, qualname, record)
                 class_stack.append(node.name)
                 self.generic_visit(node)
                 class_stack.pop()
@@ -101,7 +160,10 @@ def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
                     "name": func_name,
                     "qualname": qualname,
                 }
-                index.setdefault(func_name, []).append(record)
+                _index_record(index, func_name, record)
+                _index_record(index, qualname, record)
+                if "." in qualname:
+                    _index_record(index, ".".join(qualname.split(".")[-2:]), record)
                 func_stack.append(func_name)
                 self.generic_visit(node)
                 func_stack.pop()
@@ -120,21 +182,25 @@ def _get_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
     return _FUNCTION_INDEX_CACHE[cache_key]
 
 
-def _select_best_match(candidates: list[dict[str, str]], file_hint: str) -> list[dict[str, str]]:
+def _select_best_match(candidates: list[dict[str, str]], file_hint: str, query_func: str) -> list[dict[str, str]]:
     if not file_hint:
         return candidates
     hint = file_hint.lower()
-    scored: list[tuple[int, dict[str, str]]] = []
+    scored: list[tuple[tuple[int, int, int], dict[str, str]]] = []
     for record in candidates:
+        func_rank = _function_match_rank(query_func, record)
         file_path = record["file"].lower()
         basename = Path(file_path).name
         if hint in file_path:
-            score = 0
+            path_rank = 0
         else:
-            score = min(_levenshtein(hint, file_path), _levenshtein(hint, basename))
-        scored.append((score, record))
+            path_rank = min(_levenshtein(hint, file_path), _levenshtein(hint, basename))
+        scored.append(((func_rank[0], func_rank[1], path_rank), record))
     scored.sort(key=lambda item: item[0])
-    return [scored[0][1]] if scored else []
+    if not scored:
+        return []
+    best = scored[0][0]
+    return [record for score, record in scored if score == best]
 
 
 def map_functions_to_entities(
@@ -154,17 +220,14 @@ def map_functions_to_entities(
         file_hint = item.get("file_hint", "").strip()
         if not func:
             continue
-        candidates = index.get(func, [])
-        if not candidates and "." in func:
-            leaf = func.rsplit(".", 1)[-1]
-            candidates = index.get(leaf, [])
+        candidates = _gather_function_candidates(index, func)
         if candidates:
             if file_hint:
-                selected = _select_best_match(candidates, file_hint)
+                selected = _select_best_match(candidates, file_hint, func)
             elif len(candidates) == 1:
                 selected = candidates
             else:
-                selected = candidates[:top_k]
+                selected = sorted(candidates, key=lambda rec: _function_match_rank(func, rec))[:top_k]
             for record in selected[:top_k]:
                 entity_id = f"{record['file']}:{record['qualname']}"
                 if entity_id not in seen_entities:
@@ -327,24 +390,46 @@ def build_loc_output(
     found_files = normalize_list(payload.get("found_files") or payload.get("files"))
     found_entities = normalize_list(payload.get("found_entities") or payload.get("entities"))
     found_modules = normalize_list(payload.get("found_modules") or payload.get("modules"))
+    has_functions_key = isinstance(payload, dict) and "functions" in payload
+    function_items = _normalize_function_items(payload.get("functions")) if has_functions_key else []
 
-    if repo_root and payload.get("functions"):
-        function_items = _normalize_function_items(payload.get("functions"))
-        if function_items:
-            found_files, found_entities, found_modules = map_functions_to_entities(
-                repo_root, function_items
-            )
+    if repo_root and function_items:
+        found_files, found_entities, found_modules = map_functions_to_entities(
+            repo_root, function_items
+        )
 
     if not found_files and found_entities:
         found_files = normalize_list([item.split(":", 1)[0] for item in found_entities if ":" in item])
     if not found_modules and found_entities:
         found_modules = entities_to_modules(found_entities)
 
+    submitted_function_count: int | None = None
+    submitted_unique_function_count: int | None = None
+    submitted_file_hint_count: int | None = None
+    submitted_qualified_function_count: int | None = None
+    submitted_qualified_function_ratio: float | None = None
+    if has_functions_key:
+        submitted_names = [item.get("function", "").strip() for item in function_items if item.get("function")]
+        submitted_hints = [item.get("file_hint", "").strip() for item in function_items if item.get("file_hint")]
+        submitted_function_count = len(function_items)
+        submitted_unique_function_count = len(set(submitted_names))
+        submitted_file_hint_count = len(set(submitted_hints))
+        submitted_qualified_function_count = sum(1 for name in submitted_names if "." in name)
+        submitted_qualified_function_ratio = (
+            submitted_qualified_function_count / len(submitted_names) if submitted_names else 0.0
+        )
+
     output = {
         "instance_id": instance_id,
         "found_files": found_files,
         "found_modules": found_modules,
         "found_entities": found_entities,
+        "submission_has_functions_key": has_functions_key,
+        "submitted_function_count": submitted_function_count,
+        "submitted_unique_function_count": submitted_unique_function_count,
+        "submitted_file_hint_count": submitted_file_hint_count,
+        "submitted_qualified_function_count": submitted_qualified_function_count,
+        "submitted_qualified_function_ratio": submitted_qualified_function_ratio,
         "raw_output_loc": [raw_response] if raw_response else [],
         "meta_data": build_meta(record),
     }
@@ -353,17 +438,49 @@ def build_loc_output(
     return output
 
 
-def _build_gt_sets(record: dict[str, Any] | None) -> tuple[set[str], set[str]]:
+def _parse_gt_functions(values: Any) -> tuple[set[str], set[str]]:
+    files: set[str] = set()
+    entities: set[str] = set()
+    raw_values = values if isinstance(values, list) else [values]
+    for func in raw_values:
+        if not isinstance(func, str):
+            continue
+        cleaned = func.strip()
+        if ":" not in cleaned:
+            continue
+        file_path, _name = cleaned.rsplit(":", 1)
+        if not file_path:
+            continue
+        files.add(file_path)
+        entities.add(cleaned)
+    return files, entities
+
+
+def _build_gt_components(record: dict[str, Any] | None) -> dict[str, set[str]]:
     if not record:
-        return set(), set()
-    gt_files: set[str] = set()
-    gt_entities: set[str] = set()
-    for func in record.get("edit_functions", []) + record.get("added_functions", []):
-        parts = func.rsplit(":", 1)
-        if len(parts) == 2:
-            gt_files.add(parts[0])
-            gt_entities.add(func)
-    return gt_files, gt_entities
+        return {
+            "all_files": set(),
+            "all_entities": set(),
+            "edit_files": set(),
+            "edit_entities": set(),
+            "added_files": set(),
+            "added_entities": set(),
+        }
+    edit_files, edit_entities = _parse_gt_functions(record.get("edit_functions", []))
+    added_files, added_entities = _parse_gt_functions(record.get("added_functions", []))
+    return {
+        "all_files": set(edit_files) | set(added_files),
+        "all_entities": set(edit_entities) | set(added_entities),
+        "edit_files": edit_files,
+        "edit_entities": edit_entities,
+        "added_files": added_files,
+        "added_entities": added_entities,
+    }
+
+
+def _build_gt_sets(record: dict[str, Any] | None) -> tuple[set[str], set[str]]:
+    components = _build_gt_components(record)
+    return components["all_files"], components["all_entities"]
 
 
 def _recall_at_k(gt: set[str], preds: list[str], k: int) -> float:
@@ -374,26 +491,65 @@ def _recall_at_k(gt: set[str], preds: list[str], k: int) -> float:
     return len(gt & set(preds[:k])) / len(gt)
 
 
+def _recall_all(gt: set[str], preds: list[str]) -> float:
+    if not gt:
+        return 0.0
+    return len(gt & set(preds)) / len(gt)
+
+
 def compute_locbench_metrics(
     record: dict[str, Any] | None,
     found_files: list[str],
     found_entities: list[str],
-    ks: tuple[int, ...] = (1, 3, 5),
+    ks: tuple[int, ...] = (1, 3, 5, 10),
 ) -> dict[str, Any]:
-    gt_files, gt_entities = _build_gt_sets(record)
+    components = _build_gt_components(record)
+    gt_files = components["all_files"]
+    gt_entities = components["all_entities"]
+    gt_edit_entities = components["edit_entities"]
+    gt_added_entities = components["added_entities"]
     file_hit_any = len(gt_files & set(found_files)) > 0 if gt_files else False
     entity_hit_any = len(gt_entities & set(found_entities)) > 0 if gt_entities else False
+    file_recall_all = _recall_all(gt_files, found_files)
+    entity_recall_all = _recall_all(gt_entities, found_entities)
     metrics: dict[str, Any] = {
         "file_hit_any": file_hit_any,
         "entity_hit_any": entity_hit_any,
         # Keep explicit function-level aliases for reporting readability.
         "function_hit_any": entity_hit_any,
         "correct": bool(file_hit_any or entity_hit_any),
+        "file_recall_all": file_recall_all,
+        "entity_recall_all": entity_recall_all,
+        "function_recall_all": entity_recall_all,
+        "file_acc_all": file_recall_all >= 1.0 if gt_files else False,
+        "entity_acc_all": entity_recall_all >= 1.0 if gt_entities else False,
+        "function_acc_all": entity_recall_all >= 1.0 if gt_entities else False,
+        "gt_file_count_all": len(gt_files),
+        "gt_function_count_all": len(gt_entities),
+        "gt_edit_function_count": len(gt_edit_entities),
+        "gt_added_function_count": len(gt_added_entities),
+        "gt_has_added_functions": bool(gt_added_entities),
+        "gt_single_file": len(gt_files) == 1 if gt_files else False,
     }
     for k in ks:
         metrics[f"file_recall_at_{k}"] = _recall_at_k(gt_files, found_files, k)
         metrics[f"entity_recall_at_{k}"] = _recall_at_k(gt_entities, found_entities, k)
         metrics[f"function_recall_at_{k}"] = metrics[f"entity_recall_at_{k}"]
+    edit_recall_all = _recall_all(gt_edit_entities, found_entities)
+    added_recall_all = _recall_all(gt_added_entities, found_entities)
+    metrics["edit_function_hit_any"] = len(gt_edit_entities & set(found_entities)) > 0 if gt_edit_entities else None
+    metrics["edit_function_recall_all"] = edit_recall_all if gt_edit_entities else None
+    metrics["edit_function_acc_all"] = edit_recall_all >= 1.0 if gt_edit_entities else None
+    metrics["added_function_hit_any"] = len(gt_added_entities & set(found_entities)) > 0 if gt_added_entities else None
+    metrics["added_function_recall_all"] = added_recall_all if gt_added_entities else None
+    metrics["added_function_acc_all"] = added_recall_all >= 1.0 if gt_added_entities else None
+    for k in ks:
+        metrics[f"edit_function_recall_at_{k}"] = (
+            _recall_at_k(gt_edit_entities, found_entities, k) if gt_edit_entities else None
+        )
+        metrics[f"added_function_recall_at_{k}"] = (
+            _recall_at_k(gt_added_entities, found_entities, k) if gt_added_entities else None
+        )
     return metrics
 
 

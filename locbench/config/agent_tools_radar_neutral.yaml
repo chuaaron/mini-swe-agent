@@ -102,8 +102,12 @@ agent:
     - Rewritten query MUST be materially different from the first query (not a light paraphrase). Prefer concrete symbols, exact error strings, protocol names, business objects, or config keywords.
     - Unless the issue provides an exact, high-confidence target file path and your first radar+read already confirms it, you SHOULD complete at least 2 radar calls before submission.
     - After file_radar_search, you may use list_symbols on candidate files to inspect structure before deep reading.
+    - If a target candidate shows many folded symbols (for example [FOLDED] symbols >= 20) or [SCOPE] methods >= 10, you MUST call list_symbols on that file before submitting.
     - list_symbols does NOT replace bash verification. You still need at least one bash read on a candidate file.
     - If you used file_radar_search and got candidate files, you MUST inspect at least one candidate file via bash before final output.
+    - High-recall output rule: prefer covering all plausible affected entities in validated target files, not only the top-1 guess.
+    - Use qualified names when possible (prefer Class.method over bare method names).
+    - Avoid duplicate function+file_hint pairs in final JSON.
     - Do not run tests.
     - File paths must be relative to the repo root (no leading slash).
     - Entity format: "path/to/file.py:entity_name" (function, class, or method).

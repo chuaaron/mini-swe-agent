@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from minisweagent.agents.tool_agent import FormatError
+from minisweagent.agents.tool_agent import FormatError, Submitted
 from minisweagent.environments.local import LocalEnvironment
 from minisweagent.locbench.runners.tools_runner import ProgressTrackingAgent, _extract_oracle_files
 from minisweagent.models.test_models import DeterministicModel
@@ -62,6 +62,17 @@ def test_extract_oracle_files_fallback_to_tests_when_needed():
     assert fallback_to_tests is True
 
 
+def test_extract_oracle_files_includes_added_functions_file_paths():
+    record = {
+        "patch": "",
+        "edit_functions": [],
+        "added_functions": ["src/core/new_api.py:create_handler"],
+    }
+    files, fallback_to_tests = _extract_oracle_files(record)
+    assert files == ["src/core/new_api.py"]
+    assert fallback_to_tests is False
+
+
 def test_oracle_agent_initializes_with_verification_gate():
     agent = _build_oracle_agent(["src/core/api.py"])
     assert agent.candidate_files == {"src/core/api.py"}
@@ -77,6 +88,26 @@ def test_oracle_agent_rejects_tool_calls():
     message = str(exc_info.value)
     assert "SYSTEM_INTERCEPTION: Tools Disabled in Oracle-Sniper Mode." in message
     assert "This is not a JSON formatting error." in message
+
+
+def test_oracle_agent_rejects_submission_outside_oracle_scope():
+    agent = _build_oracle_agent(["src/core/api.py"])
+    agent.needs_verification = False
+    agent.inspected_files = {"src/core/api.py"}
+
+    payload = 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"target","file_hint":"src/other.py"}]}\n'
+    with pytest.raises(FormatError, match="Oracle Scope Violation"):
+        agent.has_finished({"output": payload})
+
+
+def test_oracle_agent_accepts_submission_within_oracle_scope():
+    agent = _build_oracle_agent(["src/core/api.py"])
+    agent.needs_verification = False
+    agent.inspected_files = {"src/core/api.py"}
+
+    payload = 'MINI_SWE_AGENT_FINAL_OUTPUT\n{"functions":[{"function":"target","file_hint":"src/core/api.py"}]}\n'
+    with pytest.raises(Submitted):
+        agent.has_finished({"output": payload})
 
 
 def test_run_summary_computes_oracle_metrics():
@@ -159,34 +190,183 @@ def test_run_summary_computes_acc_at_1_and_file_recall_at_1():
             "exit_status": "Submitted",
             "correct": True,
             "file_recall_at_1": 1.0,
+            "file_recall_at_5": 1.0,
+            "file_recall_at_10": 1.0,
+            "file_recall_all": 1.0,
             "function_hit_any": True,
             "function_recall_at_1": 1.0,
+            "function_recall_at_5": 1.0,
+            "function_recall_at_10": 1.0,
+            "function_recall_all": 1.0,
         },
         {
             "instance_id": "b",
             "exit_status": "Submitted",
             "correct": False,
             "file_recall_at_1": 0.5,
+            "file_recall_at_5": 1.0,
+            "file_recall_at_10": 1.0,
+            "file_recall_all": 0.5,
             "function_hit_any": False,
             "function_recall_at_1": 0.0,
+            "function_recall_at_5": 0.5,
+            "function_recall_at_10": 1.0,
+            "function_recall_all": 0.5,
         },
         {
             "instance_id": "c",
             "exit_status": "Submitted",
             "correct": True,
             "file_recall_at_1": 1.0,
+            "file_recall_at_5": 1.0,
+            "file_recall_at_10": 1.0,
+            "file_recall_all": 1.0,
             "function_hit_any": True,
             "function_recall_at_1": 1.0,
+            "function_recall_at_5": 1.0,
+            "function_recall_at_10": 1.0,
+            "function_recall_all": 1.0,
         },
     ]
 
     stats = _build_overall_stats(summaries)
 
     assert stats["acc_at_1"] == pytest.approx(2 / 3)
+    assert stats["file_acc_at_1"] == pytest.approx(2 / 3)
     assert stats["file_recall_at_1"] == pytest.approx((1.0 + 0.5 + 1.0) / 3)
+    assert stats["file_acc_at_5"] == pytest.approx(1.0)
+    assert stats["file_recall_at_5"] == pytest.approx(1.0)
+    assert stats["file_acc_at_10"] == pytest.approx(1.0)
+    assert stats["file_recall_at_10"] == pytest.approx(1.0)
+    assert stats["acc_all"] == pytest.approx(2 / 3)
+    assert stats["file_acc_all"] == pytest.approx(2 / 3)
+    assert stats["file_recall_all"] == pytest.approx((1.0 + 0.5 + 1.0) / 3)
     assert stats["function_hit_rate"] == pytest.approx(2 / 3)
     assert stats["function_acc_at_1"] == pytest.approx(2 / 3)
     assert stats["function_recall_at_1"] == pytest.approx((1.0 + 0.0 + 1.0) / 3)
+    assert stats["function_acc_at_5"] == pytest.approx(2 / 3)
+    assert stats["function_recall_at_5"] == pytest.approx((1.0 + 0.5 + 1.0) / 3)
+    assert stats["function_acc_at_10"] == pytest.approx(1.0)
+    assert stats["function_recall_at_10"] == pytest.approx(1.0)
+    assert stats["function_acc_all"] == pytest.approx(2 / 3)
+    assert stats["function_recall_all"] == pytest.approx((1.0 + 0.5 + 1.0) / 3)
+
+
+def test_run_summary_computes_submission_shape_metrics():
+    summaries = [
+        {
+            "instance_id": "a",
+            "exit_status": "Submitted",
+            "correct": True,
+            "submitted_function_count": 1,
+            "submitted_file_hint_count": 1,
+            "submitted_qualified_function_ratio": 1.0,
+        },
+        {
+            "instance_id": "b",
+            "exit_status": "Submitted",
+            "correct": False,
+            "submitted_function_count": 3,
+            "submitted_file_hint_count": 2,
+            "submitted_qualified_function_ratio": 0.5,
+        },
+        {
+            "instance_id": "c",
+            "exit_status": "Submitted",
+            "correct": True,
+            "submitted_function_count": 2,
+            "submitted_file_hint_count": 1,
+            "submitted_qualified_function_ratio": 0.0,
+        },
+    ]
+
+    stats = _build_overall_stats(summaries)
+
+    assert stats["submission_functions_payload_rate"] == pytest.approx(1.0)
+    assert stats["avg_submitted_function_count"] == pytest.approx(2.0)
+    assert stats["p50_submitted_function_count"] == 2
+    assert stats["p90_submitted_function_count"] == 3
+    assert stats["single_function_submission_rate"] == pytest.approx(1 / 3)
+    assert stats["under_two_functions_submission_rate"] == pytest.approx(2 / 3)
+    assert stats["avg_submitted_file_hint_count"] == pytest.approx((1 + 2 + 1) / 3)
+    assert stats["avg_submitted_qualified_function_ratio"] == pytest.approx((1.0 + 0.5 + 0.0) / 3)
+
+
+def test_run_summary_computes_edit_added_and_bucket_stats():
+    summaries = [
+        {
+            "instance_id": "a",
+            "exit_status": "Submitted",
+            "correct": True,
+            "steps": 3,
+            "submitted_function_count": 1,
+            "function_recall_at_1": 1.0,
+            "function_recall_all": 1.0,
+            "edit_function_recall_at_1": 1.0,
+            "edit_function_recall_all": 1.0,
+            "added_function_recall_at_1": None,
+            "added_function_recall_all": None,
+            "gt_file_count_all": 1,
+            "gt_function_count_all": 1,
+            "gt_added_function_count": 0,
+        },
+        {
+            "instance_id": "b",
+            "exit_status": "Submitted",
+            "correct": False,
+            "steps": 6,
+            "submitted_function_count": 2,
+            "function_recall_at_1": 0.5,
+            "function_recall_all": 0.5,
+            "edit_function_recall_at_1": 1.0,
+            "edit_function_recall_all": 1.0,
+            "added_function_recall_at_1": 0.0,
+            "added_function_recall_all": 0.0,
+            "gt_file_count_all": 1,
+            "gt_function_count_all": 2,
+            "gt_added_function_count": 1,
+        },
+        {
+            "instance_id": "c",
+            "exit_status": "Submitted",
+            "correct": True,
+            "steps": 8,
+            "submitted_function_count": 4,
+            "function_recall_at_1": 1.0,
+            "function_recall_all": 1.0,
+            "edit_function_recall_at_1": 1.0,
+            "edit_function_recall_all": 1.0,
+            "added_function_recall_at_1": 1.0,
+            "added_function_recall_all": 1.0,
+            "gt_file_count_all": 2,
+            "gt_function_count_all": 4,
+            "gt_added_function_count": 1,
+        },
+    ]
+
+    stats = _build_overall_stats(summaries)
+
+    assert stats["edit_function_recall_at_1"] == pytest.approx(1.0)
+    assert stats["edit_function_recall_all"] == pytest.approx(1.0)
+    assert stats["edit_function_acc_all"] == pytest.approx(1.0)
+    assert stats["added_function_eval_count"] == 2
+    assert stats["added_function_recall_all"] == pytest.approx(0.5)
+    assert stats["added_function_acc_all"] == pytest.approx(0.5)
+    assert stats["added_coverage_rate"] == pytest.approx(0.5)
+    assert stats["added_coverage_acc_all"] == pytest.approx(0.5)
+    assert stats["single_file_instance_count"] == 2
+    assert stats["multi_file_instance_count"] == 1
+
+    by_bucket = stats["stats_by_gt_bucket"]
+    assert by_bucket["single_file"]["count"] == 2
+    assert by_bucket["single_file"]["function_recall_all"] == pytest.approx(0.75)
+    assert by_bucket["multi_file"]["count"] == 1
+    assert by_bucket["multi_file"]["function_recall_all"] == pytest.approx(1.0)
+    assert by_bucket["func_count_1"]["count"] == 1
+    assert by_bucket["func_count_2"]["count"] == 1
+    assert by_bucket["func_count_4_plus"]["count"] == 1
+    assert by_bucket["has_added_functions"]["count"] == 2
+    assert by_bucket["no_added_functions"]["count"] == 1
 
 
 def test_run_summary_computes_anti_laziness_metrics():

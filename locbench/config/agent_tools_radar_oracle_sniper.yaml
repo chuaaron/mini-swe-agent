@@ -63,11 +63,19 @@ agent:
     - Read-only work: do not modify files.
 
     ## Goal
-    Identify the most relevant class/function entities to edit in the Oracle file(s).
+    Identify a high-recall set of class/function entities to edit in the Oracle file(s).
+    Prefer coverage over minimality: include all plausible edit targets supported by your evidence.
 
     ## Rules
     - You MUST inspect at least one Oracle file via bash before final output.
+    - For each Oracle file you rely on, run at least one symbol sweep command such as:
+      `rg -n "^[[:space:]]*(async[[:space:]]+def|def|class)[[:space:]]+" <oracle_file>`
+    - If an Oracle file contains many methods/functions, avoid single-function output unless evidence is explicitly single-point.
     - Final JSON file_hint values should refer to inspected files.
+    - Output function names with qualification when possible:
+      - prefer `Class.method` over bare `method`
+      - prefer explicit function names over generic labels
+    - Before submitting, quickly cross-check that each Oracle file you inspected has its likely edit entity candidates represented.
     - File paths must be relative to the repo root (no leading slash).
     - Entity format: "path/to/file.py:entity_name" (function, class, or method).
 
