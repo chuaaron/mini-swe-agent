@@ -16,6 +16,11 @@ run:
   method: ""
   agent_config: ""
   tool_config: ""
+  feedback_loop: false
+  feedback_mode: rule
+  feedback_every_n_steps: 3
+  feedback_max_rounds: 4
+  feedback_submission_gate: true
   keep_worktrees: false
   worktrees_mode: ephemeral
   worktrees_gc_hours: 24

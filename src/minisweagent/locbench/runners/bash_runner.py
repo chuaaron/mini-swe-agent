@@ -26,6 +26,7 @@ from minisweagent.run.extra.utils.batch_progress import RunBatchProgressManager
 from minisweagent.run.extra.utils.run_summary import write_run_summary
 from minisweagent.run.utils.save import save_traj
 from minisweagent.locbench.config_loader import project_root
+from minisweagent.locbench.feedback_loop_agent import FeedbackLoopBashAgent
 from minisweagent.locbench.utils import (
     build_answer_stats,
     compute_locbench_metrics,
@@ -70,6 +71,20 @@ class ProgressTrackingAgent(DefaultAgent):
         return super().step()
 
 
+class FeedbackProgressTrackingAgent(FeedbackLoopBashAgent):
+    def __init__(self, *args, progress_manager: RunBatchProgressManager, instance_id: str = "", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.progress_manager = progress_manager
+        self.instance_id = instance_id
+
+    def step(self) -> dict:
+        tokens = getattr(self.model, "total_tokens", 0)
+        self.progress_manager.update_instance_status(
+            self.instance_id, f"Step {self.model.n_calls + 1:3d} ({tokens} toks)"
+        )
+        return super().step()
+
+
 class BashRunner:
     def __init__(
         self,
@@ -93,6 +108,11 @@ class BashRunner:
         method: str,
         output_dir: str,
         redo_existing: bool,
+        feedback_loop: bool,
+        feedback_mode: str,
+        feedback_every_n_steps: int,
+        feedback_max_rounds: int,
+        feedback_submission_gate: bool,
         pricing: dict[str, Any] | None,
         billing: dict[str, Any] | None,
     ) -> None:
@@ -115,6 +135,11 @@ class BashRunner:
         self.method = method
         self.output_dir = output_dir
         self.redo_existing = redo_existing
+        self.feedback_loop = feedback_loop
+        self.feedback_mode = feedback_mode
+        self.feedback_every_n_steps = feedback_every_n_steps
+        self.feedback_max_rounds = feedback_max_rounds
+        self.feedback_submission_gate = feedback_submission_gate
         self.pricing = pricing
         self.billing = billing
 
@@ -139,6 +164,11 @@ class BashRunner:
             method=self.method,
             output_dir=self.output_dir,
             redo_existing=self.redo_existing,
+            feedback_loop=self.feedback_loop,
+            feedback_mode=self.feedback_mode,
+            feedback_every_n_steps=self.feedback_every_n_steps,
+            feedback_max_rounds=self.feedback_max_rounds,
+            feedback_submission_gate=self.feedback_submission_gate,
             pricing=self.pricing,
             billing=self.billing,
         )
@@ -276,6 +306,11 @@ def _process_instance(
     repo_root: Path,
     summary_sink: list[dict[str, Any]],
     summary_lock: threading.Lock,
+    feedback_loop: bool,
+    feedback_mode: str,
+    feedback_every_n_steps: int,
+    feedback_max_rounds: int,
+    feedback_submission_gate: bool,
 ) -> None:
     instance_id = instance["instance_id"]
     trajectories_dir.mkdir(parents=True, exist_ok=True)
@@ -293,17 +328,34 @@ def _process_instance(
     exit_status = "Unknown"
     result = ""
     stats: dict[str, Any] | None = None
+    feedback_stats: dict[str, Any] = {}
 
     try:
         env = _get_locbench_environment(config, instance, repo_root)
         progress_manager.update_instance_status(instance_id, "Running agent")
-        agent = ProgressTrackingAgent(
-            model,
-            env,
-            progress_manager=progress_manager,
-            instance_id=instance_id,
-            **config.get("agent", {}),
-        )
+        if feedback_loop:
+            agent = FeedbackProgressTrackingAgent(
+                model,
+                env,
+                progress_manager=progress_manager,
+                instance_id=instance_id,
+                feedback_mode=feedback_mode,
+                feedback_every_n_steps=feedback_every_n_steps,
+                feedback_max_rounds=feedback_max_rounds,
+                feedback_submission_gate=feedback_submission_gate,
+                repo_path=instance.get("repo_path") or instance.get("repo_source_path"),
+                repo_mount_path=instance.get("repo_mount_path"),
+                workdir=instance.get("workdir"),
+                **config.get("agent", {}),
+            )
+        else:
+            agent = ProgressTrackingAgent(
+                model,
+                env,
+                progress_manager=progress_manager,
+                instance_id=instance_id,
+                **config.get("agent", {}),
+            )
         exit_status, result = agent.run(task, **instance)
         if exit_status == "LimitsExceeded":
             fallback_text = _get_last_assistant_content(agent)
@@ -311,11 +363,15 @@ def _process_instance(
                 payload, raw = extract_json_payload(fallback_text)
                 result = raw if payload is not None and raw else build_fallback_loc_result(fallback_text)
         stats = build_answer_stats(model)
+        if agent and hasattr(agent, "get_feedback_stats"):
+            feedback_stats = agent.get_feedback_stats()
     except Exception as exc:
         logger.error("Error processing instance %s: %s", instance_id, exc, exc_info=True)
         exit_status, result = type(exc).__name__, str(exc)
         extra_info = {"traceback": traceback.format_exc()}
         stats = build_answer_stats(model) if model else None
+        if agent and hasattr(agent, "get_feedback_stats"):
+            feedback_stats = agent.get_feedback_stats()
     finally:
         _run_teardown_command(env, config, instance)
         _cleanup_environment(env)
@@ -340,6 +396,9 @@ def _process_instance(
         output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
         output_record["trace_tokens"] = billing_stats.get("trace_tokens", billing_stats.get("total_tokens", 0))
         output_record["billed_tokens"] = billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0))
+        output_record["feedback_loop_enabled"] = bool(feedback_loop)
+        if feedback_stats:
+            output_record["feedback"] = feedback_stats
         metrics = compute_locbench_metrics(
             bench_data.get(instance_id),
             output_record.get("found_files", []),
@@ -355,10 +414,16 @@ def _process_instance(
             "billed_tokens": billing_stats.get("billed_tokens", billing_stats.get("total_tokens", 0)),
             "cost_usd": billing_stats.get("cost_usd", getattr(model, "cost", 0.0)),
             "correct": metrics.get("correct"),
+            "feedback_loop_enabled": bool(feedback_loop),
+            "feedback_rounds": int(feedback_stats.get("feedback_rounds", 0)) if feedback_stats else 0,
+            "blocked_submissions": int(feedback_stats.get("blocked_submissions", 0)) if feedback_stats else 0,
         }
         for key, value in metrics.items():
             if key != "correct":
                 summary_record[key] = value
+        if feedback_stats and isinstance(feedback_stats.get("reason_counts"), dict):
+            for reason, count in feedback_stats["reason_counts"].items():
+                summary_record[f"feedback_reason__{reason}"] = count
         with summary_lock:
             summary_sink.append(summary_record)
         progress_manager.on_instance_end(instance_id, exit_status)
@@ -385,6 +450,11 @@ def run_bash(
     method: str,
     output_dir: str,
     redo_existing: bool,
+    feedback_loop: bool,
+    feedback_mode: str,
+    feedback_every_n_steps: int,
+    feedback_max_rounds: int,
+    feedback_submission_gate: bool,
     pricing: dict[str, Any] | None,
     billing: dict[str, Any] | None,
 ) -> None:
@@ -412,6 +482,9 @@ def run_bash(
         config.setdefault("model", {})["model_class"] = model_class
     if billing is not None:
         config.setdefault("model", {})["billing"] = billing
+    if feedback_mode not in {"rule", "hybrid"}:
+        logger.warning("Invalid feedback_mode '%s'; fallback to rule", feedback_mode)
+        feedback_mode = "rule"
 
     env_class = config.get("environment", {}).get("environment_class", "docker")
     if env_class == "local":
@@ -494,6 +567,11 @@ def run_bash(
                     repos_root,
                     instance_summaries,
                     summary_lock,
+                    feedback_loop,
+                    feedback_mode,
+                    feedback_every_n_steps,
+                    feedback_max_rounds,
+                    feedback_submission_gate,
                 ): instance["instance_id"]
                 for instance in instances
             }
@@ -508,6 +586,11 @@ def run_bash(
             "model_class": model_class or config.get("model", {}).get("model_class"),
             "method": method,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "feedback_loop": bool(feedback_loop),
+            "feedback_mode": feedback_mode,
+            "feedback_every_n_steps": int(feedback_every_n_steps),
+            "feedback_max_rounds": int(feedback_max_rounds),
+            "feedback_submission_gate": bool(feedback_submission_gate),
         },
         instance_summaries=instance_summaries,
         csv_path=output_dir_path / "run_summary.csv",

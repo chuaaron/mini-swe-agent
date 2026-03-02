@@ -51,6 +51,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--agent-config", help="Override run.agent_config")
     parser.add_argument("--tool-config", help="Override run.tool_config")
     parser.add_argument("--environment-class", help="Override run.environment_class")
+    parser.add_argument("--feedback-loop", action=argparse.BooleanOptionalAction, help="Bash mode: enable feedback loop")
+    parser.add_argument("--feedback-mode", choices=["rule", "hybrid"], help="Bash mode feedback strategy")
+    parser.add_argument(
+        "--feedback-every-n-steps",
+        type=int,
+        help="Bash mode: minimum number of actions between feedback messages",
+    )
+    parser.add_argument("--feedback-max-rounds", type=int, help="Bash mode: maximum feedback rounds per instance")
+    parser.add_argument(
+        "--feedback-submission-gate",
+        action=argparse.BooleanOptionalAction,
+        help="Bash mode: block final submission when evidence is insufficient",
+    )
     parser.add_argument(
         "--tools-prompt",
         choices=sorted(_ALLOWED_TOOLS_PROMPTS),
@@ -127,6 +140,16 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["run"]["tool_config"] = args.tool_config
     if args.environment_class:
         overrides["run"]["environment_class"] = args.environment_class
+    if args.feedback_loop is not None:
+        overrides["run"]["feedback_loop"] = args.feedback_loop
+    if args.feedback_mode is not None:
+        overrides["run"]["feedback_mode"] = args.feedback_mode
+    if args.feedback_every_n_steps is not None:
+        overrides["run"]["feedback_every_n_steps"] = args.feedback_every_n_steps
+    if args.feedback_max_rounds is not None:
+        overrides["run"]["feedback_max_rounds"] = args.feedback_max_rounds
+    if args.feedback_submission_gate is not None:
+        overrides["run"]["feedback_submission_gate"] = args.feedback_submission_gate
     if args.tools_prompt is not None:
         overrides["run"]["tools_prompt"] = args.tools_prompt
 
@@ -273,6 +296,11 @@ def _log_summary(
         "skip_missing": run_cfg.get("skip_missing"),
         "redo_existing": run_cfg.get("redo_existing"),
         "output_dir": run_cfg.get("output_dir"),
+        "feedback_loop": run_cfg.get("feedback_loop"),
+        "feedback_mode": run_cfg.get("feedback_mode"),
+        "feedback_every_n_steps": run_cfg.get("feedback_every_n_steps"),
+        "feedback_max_rounds": run_cfg.get("feedback_max_rounds"),
+        "feedback_submission_gate": run_cfg.get("feedback_submission_gate"),
         "agent_config": str(agent_config),
         "tool_config": str(tool_config) if tool_config else "",
         "tools_prompt": run_cfg.get("tools_prompt"),
@@ -334,6 +362,11 @@ def main(argv: list[str] | None = None) -> None:
     method = _default_method(mode, run_cfg.get("method"))
     image = _normalize_optional(run_cfg.get("image"))
     environment_class = _normalize_optional(run_cfg.get("environment_class"))
+    feedback_loop = bool(run_cfg.get("feedback_loop", False))
+    feedback_mode = str(run_cfg.get("feedback_mode", "rule") or "rule").strip().lower()
+    feedback_every_n_steps = int(run_cfg.get("feedback_every_n_steps", 3))
+    feedback_max_rounds = int(run_cfg.get("feedback_max_rounds", 4))
+    feedback_submission_gate = bool(run_cfg.get("feedback_submission_gate", True))
 
     model_name = _normalize_optional(model_cfg.get("model_name"))
     model_class = _normalize_optional(model_cfg.get("model_class"))
@@ -409,6 +442,11 @@ def main(argv: list[str] | None = None) -> None:
             method=method,
             output_dir=output_dir,
             redo_existing=redo_existing,
+            feedback_loop=feedback_loop,
+            feedback_mode=feedback_mode,
+            feedback_every_n_steps=feedback_every_n_steps,
+            feedback_max_rounds=feedback_max_rounds,
+            feedback_submission_gate=feedback_submission_gate,
             pricing=pricing,
             billing=billing,
         )
