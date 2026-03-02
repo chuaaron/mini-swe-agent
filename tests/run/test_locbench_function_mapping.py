@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import minisweagent.locbench.utils as loc_utils
 from minisweagent.locbench.utils import build_loc_output
 
 
@@ -78,3 +79,68 @@ def test_build_loc_output_prefers_class_specific_method_over_same_leaf(tmp_path:
     assert output["submission_has_functions_key"] is True
     assert output["submitted_function_count"] == 1
     assert output["submitted_unique_function_count"] == 1
+
+
+def test_build_loc_output_prefers_exact_file_hint_for_ambiguous_leaf_function(tmp_path: Path):
+    repo = tmp_path / "repo"
+    _write_file(
+        repo / "pkg" / "target.py",
+        (
+            "def shift():\n"
+            "    return 1\n"
+        ),
+    )
+    _write_file(
+        repo / "pkg" / "other.py",
+        (
+            "def shift():\n"
+            "    return 2\n"
+        ),
+    )
+    payload = {
+        "functions": [
+            {
+                "function": "shift",
+                "file_hint": "pkg/target.py",
+            }
+        ]
+    }
+
+    output = build_loc_output(
+        json.dumps(payload),
+        "inst-3",
+        {"edit_functions": [], "added_functions": []},
+        repo_root=str(repo),
+    )
+
+    assert "pkg/target.py" in output["found_files"]
+    assert "pkg/target.py:shift" in output["found_entities"]
+
+
+def test_build_loc_output_keeps_file_hint_when_mapping_points_elsewhere(
+    tmp_path: Path, monkeypatch
+):
+    repo = tmp_path / "repo"
+    _write_file(repo / "pkg" / "target.py", "def shift():\n    return 1\n")
+    payload = {
+        "functions": [
+            {
+                "function": "shift",
+                "file_hint": "pkg/target.py",
+            }
+        ]
+    }
+
+    def _fake_map_functions_to_entities(_repo_root: str, _functions: list[dict[str, str]], *, top_k: int = 10):
+        return ["pkg/other.py"], ["pkg/other.py:shift"], ["pkg/other.py"]
+
+    monkeypatch.setattr(loc_utils, "map_functions_to_entities", _fake_map_functions_to_entities)
+    output = build_loc_output(
+        json.dumps(payload),
+        "inst-4",
+        {"edit_functions": [], "added_functions": []},
+        repo_root=str(repo),
+    )
+
+    assert "pkg/target.py" in output["found_files"]
+    assert "pkg/target.py:shift" in output["found_entities"]

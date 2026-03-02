@@ -112,66 +112,72 @@ def _function_match_rank(query_func: str, record: dict[str, str]) -> tuple[int, 
 def _build_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
     index: dict[str, list[dict[str, str]]] = {}
     root = Path(repo_root)
-    for path in root.rglob("*.py"):
-        rel_path = path.relative_to(root).as_posix()
-        try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        try:
-            tree = __import__("ast").parse(source, filename=str(path))
-        except SyntaxError:
-            continue
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        # Ignore git internals to avoid scanning transient worktree metadata.
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        for filename in filenames:
+            if not filename.endswith(".py"):
+                continue
+            path = Path(dirpath) / filename
+            rel_path = path.relative_to(root).as_posix()
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            try:
+                tree = __import__("ast").parse(source, filename=str(path))
+            except SyntaxError:
+                continue
 
-        class_stack: list[str] = []
-        func_stack: list[str] = []
+            class_stack: list[str] = []
+            func_stack: list[str] = []
 
-        class Visitor(__import__("ast").NodeVisitor):
-            def visit_ClassDef(self, node):  # type: ignore[override]
-                cls_name = getattr(node, "name", "")
-                if cls_name:
-                    qual_parts = class_stack + [cls_name]
-                    qualname = ".".join(qual_parts) if len(qual_parts) > 1 else cls_name
+            class Visitor(__import__("ast").NodeVisitor):
+                def visit_ClassDef(self, node):  # type: ignore[override]
+                    cls_name = getattr(node, "name", "")
+                    if cls_name:
+                        qual_parts = class_stack + [cls_name]
+                        qualname = ".".join(qual_parts) if len(qual_parts) > 1 else cls_name
+                        record = {
+                            "file": rel_path,
+                            "name": cls_name,
+                            "qualname": qualname,
+                        }
+                        _index_record(index, cls_name, record)
+                        _index_record(index, qualname, record)
+                    class_stack.append(node.name)
+                    self.generic_visit(node)
+                    class_stack.pop()
+
+                def visit_FunctionDef(self, node):  # type: ignore[override]
+                    self._visit_function(node)
+
+                def visit_AsyncFunctionDef(self, node):  # type: ignore[override]
+                    self._visit_function(node)
+
+                def _visit_function(self, node):
+                    func_name = getattr(node, "name", "")
+                    if not func_name:
+                        return
+                    qual_parts = class_stack + func_stack + [func_name]
+                    qualname = ".".join(qual_parts) if qual_parts else func_name
                     record = {
                         "file": rel_path,
-                        "name": cls_name,
+                        "name": func_name,
                         "qualname": qualname,
                     }
-                    _index_record(index, cls_name, record)
+                    _index_record(index, func_name, record)
                     _index_record(index, qualname, record)
-                class_stack.append(node.name)
-                self.generic_visit(node)
-                class_stack.pop()
+                    if "." in qualname:
+                        _index_record(index, ".".join(qualname.split(".")[-2:]), record)
+                    func_stack.append(func_name)
+                    self.generic_visit(node)
+                    func_stack.pop()
 
-            def visit_FunctionDef(self, node):  # type: ignore[override]
-                self._visit_function(node)
-
-            def visit_AsyncFunctionDef(self, node):  # type: ignore[override]
-                self._visit_function(node)
-
-            def _visit_function(self, node):
-                func_name = getattr(node, "name", "")
-                if not func_name:
-                    return
-                qual_parts = class_stack + func_stack + [func_name]
-                qualname = ".".join(qual_parts) if qual_parts else func_name
-                record = {
-                    "file": rel_path,
-                    "name": func_name,
-                    "qualname": qualname,
-                }
-                _index_record(index, func_name, record)
-                _index_record(index, qualname, record)
-                if "." in qualname:
-                    _index_record(index, ".".join(qualname.split(".")[-2:]), record)
-                func_stack.append(func_name)
-                self.generic_visit(node)
-                func_stack.pop()
-
-        try:
-            Visitor().visit(tree)
-        except RecursionError:
-            continue
+            try:
+                Visitor().visit(tree)
+            except RecursionError:
+                continue
     return index
 
 
@@ -182,17 +188,51 @@ def _get_function_index(repo_root: str) -> dict[str, list[dict[str, str]]]:
     return _FUNCTION_INDEX_CACHE[cache_key]
 
 
+def _normalize_hint_path(path: str) -> str:
+    return str(path or "").strip().replace("\\", "/").lower()
+
+
+def _hint_matches_path(file_hint: str, file_path: str) -> bool:
+    hint = _normalize_hint_path(file_hint)
+    path = _normalize_hint_path(file_path)
+    if not hint or not path:
+        return False
+    if hint == path:
+        return True
+    if path.endswith(f"/{hint}"):
+        return True
+    if Path(path).name == hint:
+        return True
+    return hint in path
+
+
+def _hint_path_rank(file_hint: str, file_path: str) -> int:
+    hint = _normalize_hint_path(file_hint)
+    path = _normalize_hint_path(file_path)
+    if not hint or not path:
+        return 4
+    if hint == path:
+        return 0
+    if path.endswith(f"/{hint}"):
+        return 1
+    if Path(path).name == hint:
+        return 2
+    return 3
+
+
 def _select_best_match(candidates: list[dict[str, str]], file_hint: str, query_func: str) -> list[dict[str, str]]:
     if not file_hint:
         return candidates
-    hint = file_hint.lower()
+    path_matched = [record for record in candidates if _hint_matches_path(file_hint, record.get("file", ""))]
+    search_space = path_matched or candidates
+    hint = _normalize_hint_path(file_hint)
     scored: list[tuple[tuple[int, int, int], dict[str, str]]] = []
-    for record in candidates:
+    for record in search_space:
         func_rank = _function_match_rank(query_func, record)
-        file_path = record["file"].lower()
+        file_path = _normalize_hint_path(record["file"])
         basename = Path(file_path).name
-        if hint in file_path:
-            path_rank = 0
+        if path_matched:
+            path_rank = _hint_path_rank(hint, file_path)
         else:
             path_rank = min(_levenshtein(hint, file_path), _levenshtein(hint, basename))
         scored.append(((func_rank[0], func_rank[1], path_rank), record))
@@ -393,10 +433,20 @@ def build_loc_output(
     has_functions_key = isinstance(payload, dict) and "functions" in payload
     function_items = _normalize_function_items(payload.get("functions")) if has_functions_key else []
 
+    submitted_hint_files = normalize_list([item.get("file_hint", "").strip() for item in function_items])
+    fallback_hint_entities: list[str] = []
     if repo_root and function_items:
-        found_files, found_entities, found_modules = map_functions_to_entities(
-            repo_root, function_items
-        )
+        found_files, found_entities, found_modules = map_functions_to_entities(repo_root, function_items)
+        mapped_entity_files = {item.split(":", 1)[0] for item in found_entities if ":" in item}
+        for item in function_items:
+            file_hint = item.get("file_hint", "").strip()
+            func = item.get("function", "").strip()
+            if file_hint and func and file_hint not in mapped_entity_files:
+                fallback_hint_entities.append(f"{file_hint}:{func}")
+    found_files = normalize_list(found_files + submitted_hint_files)
+    found_entities = normalize_list(found_entities + fallback_hint_entities)
+    if fallback_hint_entities:
+        found_modules = normalize_list(found_modules + entities_to_modules(fallback_hint_entities))
 
     if not found_files and found_entities:
         found_files = normalize_list([item.split(":", 1)[0] for item in found_entities if ":" in item])

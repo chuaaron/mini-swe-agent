@@ -334,7 +334,7 @@ def _process_instance(
             instance_id,
             bench_data.get(instance_id),
             stats=stats,
-            repo_root=instance.get("repo_source_path") or instance.get("repo_path"),
+            repo_root=instance.get("repo_path") or instance.get("repo_source_path"),
         )
         output_record["exit_status"] = exit_status
         output_record["steps"] = getattr(model, "n_calls", 0) if model else 0
