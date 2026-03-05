@@ -6,6 +6,8 @@ preds.json
 traj.json
 .claude/**
 
+analysis_doc_draft/
+
 # local run configs with secrets
 swe_qa_bench/config/run_*.yaml
 swe_qa_bench/config/run_example.yaml
@@ -221,3 +223,4 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+.DS_Store
