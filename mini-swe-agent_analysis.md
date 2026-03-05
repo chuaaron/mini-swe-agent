@@ -40,26 +40,26 @@ mini-swe-agent is organized into four core modules:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   Agent Main Loop                    │
+│                   Agent Main Loop                   │
 ├─────────────────────────────────────────────────────┤
 │                                                     │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐     │
-│   │  Observe │───▶│  Think   │───▶│  Act     │     │
-│   │(env.obs) │    │model.gen │    │tool call │     │
-│   └──────────┘    └──────────┘    └────┬─────┘     │
+│   ┌──────────┐    ┌──────────┐    ┌──────────┐      │
+│   │  Think   │───▶│  Act     │───▶│ Observe  │      │
+│   │(model.q) │    │(env.exe) │    │(feedback)│      │
+│   └──────────┘    └──────────┘    └────┬─────┘      │
 │        ▲                             │             │
 │        └──────────────────────────────┘             │
 │              (feedback loop)                         │
 └─────────────────────────────────────────────────────┘
 ```
 
-**Pseudocode**:
+**Pseudocode (Actual)**:
 ```python
 while not done:
-    observation = environment.observe()
-    response = model.generate(prompt + observation)
-    action = parse_action(response)
-    environment.execute(action)
+    response = agent.query()      # Consult LLM
+    action = agent.parse(response)
+    observation = agent.execute_action(action) # Execute & Capture
+    agent.add_message("user", observation)
 ```
 
 ---
@@ -86,17 +86,17 @@ mini-swe-agent uses Python protocols to define clean interfaces:
 from typing import Protocol, runtime_checkable
 
 @runtime_checkable
-class ModelProtocol(Protocol):
-    def generate(self, prompt: str) -> str: ...
+class Model(Protocol):
+    def query(self, messages: list[dict], **kwargs) -> dict: ...
 
 @runtime_checkable  
-class EnvironmentProtocol(Protocol):
-    def observe(self) -> str: ...
-    def execute(self, action: str) -> None: ...
+class Environment(Protocol):
+    def execute(self, command: str, cwd: str = "") -> dict: ...
+    def get_template_vars(self) -> dict: ...
 
 @runtime_checkable
-class AgentProtocol(Protocol):
-    def run(self, task: str) -> None: ...
+class Agent(Protocol):
+    def run(self, task: str, **kwargs) -> tuple[str, str]: ...
 ```
 
 **Why Protocols?**
@@ -109,29 +109,22 @@ class AgentProtocol(Protocol):
 ### 2.2 Model Interface Deep Dive
 
 ```python
-class ModelProtocol(Protocol):
-    """Interface for all language model backends."""
+class Model(Protocol):
+    """Actual interface for models."""
+    cost: float
+    n_calls: int
     
-    def generate(self, prompt: str) -> str:
-        """Generate completion for the given prompt."""
-        ...
-    
-    def generate_with_tools(self, 
-                           prompt: str, 
-                           tools: list[dict]) -> dict:
-        """Generate response with tool-calling capability."""
+    def query(self, messages: list[dict], **kwargs) -> dict:
+        """Return dict with 'content' and 'extra' info."""
         ...
 ```
 
 **Implementation Example**:
 ```python
-class OpenAIModel:
-    def generate(self, prompt: str) -> str:
-        response = openai.ChatCompletion.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
+class LitellmModel:
+    def query(self, messages: list[dict], **kwargs) -> dict:
+        response = litellm.completion(model=self.model, messages=messages, ...)
+        return {"content": response.choices[0].message.content, "extra": {...}}
 ```
 
 ---
@@ -139,37 +132,26 @@ class OpenAIModel:
 ### 2.3 Environment Interface Deep Dive
 
 ```python
-class EnvironmentProtocol(Protocol):
+class Environment(Protocol):
     """Interface for all task environments."""
     
-    def observe(self) -> str:
-        """Return current state observation."""
+    def execute(self, command: str, cwd: str = "") -> dict:
+        """Run bash command and return {'output', 'returncode'}."""
         ...
     
-    def execute(self, action: str) -> None:
-        """Execute an action in the environment."""
-        ...
-    
-    def reset(self) -> None:
-        """Reset environment to initial state."""
+    def get_template_vars(self) -> dict:
+        """Provide context for prompt rendering."""
         ...
 ```
 
 **Implementation Example**:
 ```python
 class TerminalEnv:
-    def __init__(self, working_dir: Path):
-        self.process = subprocess.Popen(
-            ['/bin/bash'],
-            stdout=PIPE, stderr=PIPE
+    def execute(self, command: str, cwd: str = "") -> dict:
+        result = subprocess.run(
+            command, shell=True, text=True, capture_output=True
         )
-        self.working_dir = working_dir
-    
-    def observe(self) -> str:
-        return self.process.stdout.read().decode()
-    
-    def execute(self, action: str) -> None:
-        self.process.stdin.write(action.encode())
+        return {"output": result.stdout, "returncode": result.returncode}
 ```
 
 ---
@@ -177,39 +159,28 @@ class TerminalEnv:
 ### 2.4 Agent Interface Deep Dive
 
 ```python
-class AgentProtocol(Protocol):
+class Agent(Protocol):
     """Interface for all agent implementations."""
-    
-    def __init__(self, 
-                 model: ModelProtocol, 
-                 environment: EnvironmentProtocol):
-        """Initialize with model and environment."""
-        ...
     
     def run(self, task: str) -> None:
         """Execute the agent loop for the given task."""
+        while True:
+            self.step()
         ...
 ```
 
 **Implementation Example**:
 ```python
 class DefaultAgent:
-    def __init__(self, model: ModelProtocol, environment: EnvironmentProtocol):
-        self.model = model
-        self.env = environment
-    
     def run(self, task: str) -> None:
-        prompt = f"Task: {task}\n\nPlease solve this task."
-        
         while True:
-            observation = self.env.observe()
-            response = self.model.generate(prompt + observation)
-            
-            if self._is_done(response):
-                break
-            
-            action = self._parse_action(response)
-            self.env.execute(action)
+            self.step()
+
+    def step(self):
+        response = self.query()
+        action = self.parse_action(response)
+        output = self.execute_action(action)
+        self.add_message("user", self.render(..., output=output))
 ```
 
 ---
@@ -397,44 +368,19 @@ _ENVIRONMENT_MAPPING = {
 # src/minisweagent/environments/docker.py (simplified)
 
 class DockerEnvironment:
-    def __init__(self, image: str, working_dir: Path):
-        self.image = image
-        self.working_dir = working_dir
-        self.container = None
-    
-    def setup(self):
-        """Start Docker container."""
-        self.container = docker.from_env().containers.run(
-            self.image,
-            detach=True,
-            working_dir=str(self.working_dir)
-        )
-    
-    def apply_patch(self, patch: str) -> ToolResult:
-        """Apply a diff patch to the working directory."""
-        result = self.container.exec_run(
-            ["bash", "-c", f"git apply <(echo '{patch}')"]
-        )
-        return ToolResult(
-            success=result.exit_code == 0,
-            output=result.output.decode(),
-            error=result.stderr.decode() if result.exit_code != 0 else None
-        )
-    
-    def run_tests(self, test_command: str) -> ToolResult:
-        """Run the test command in the container."""
-        result = self.container.exec_run([test_command])
-        return ToolResult(
-            success=result.exit_code == 0,
-            output=result.output.decode(),
-            error=result.stderr.decode() if result.exit_code != 0 else None
-        )
-    
-    def close(self):
-        """Stop and remove the container."""
-        if self.container:
-            self.container.stop()
-            self.container.remove()
+    """Uses subprocess to call docker CLI directly."""
+
+    def _start_container(self):
+        cmd = [self.config.executable, "run", "-d", ...]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.container_id = result.stdout.strip()
+
+    def execute(self, command, cwd="", timeout=None):
+        # Wraps command in docker exec
+        cmd = [self.config.executable, "exec", "-w", cwd, 
+               self.container_id, "bash", "-lc", command]
+        result = subprocess.run(cmd, text=True, capture_output=True)
+        return {"output": result.stdout, "returncode": result.returncode}
 ```
 
 ---
